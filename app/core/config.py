@@ -16,6 +16,7 @@ class Settings(BaseSettings):
 
     tts_api_key: str = ""
     tts_voice_id: str = ""
+    tts_provider: str = "elevenlabs"
     elevenlabs_model_id: str = "eleven_turbo_v2_5"
 
     max_call_duration_seconds: int = 480
