@@ -44,20 +44,17 @@ class VoicePipeline:
             on_final=self._on_final_transcript,
             on_error=self._on_stt_error,
         )
-        self._tts = ElevenLabsStreamingTTS()
         self._done = asyncio.Event()
         self._processing_lock = asyncio.Lock()
 
     async def start(self) -> None:
         await self._stt.connect()
-        await self._tts.connect()
         inbound = asyncio.create_task(self._inbound_loop())
         monitor = asyncio.create_task(self._monitor_loop())
         await self._done.wait()
         inbound.cancel()
         monitor.cancel()
         await self._stt.close()
-        await self._tts.close()
         if self._on_session_end:
             await self._on_session_end(self._state)
 
@@ -148,7 +145,7 @@ class VoicePipeline:
             reasoning="guardrail fallback",
         )
 
-    async def _gpt_to_sentences(self, move: AgentMove, tokens: list[str]) -> None:
+    async def _gpt_to_sentences(self, tts: ElevenLabsStreamingTTS, move: AgentMove, tokens: list[str]) -> None:
         """Buffer GPT-4o tokens into sentences, flush each sentence to ElevenLabs immediately.
 
         Flushing at sentence boundaries rather than token-by-token gives ElevenLabs
@@ -164,17 +161,17 @@ class VoicePipeline:
             parts = _SENTENCE_END.split(buffer, maxsplit=1)
             if len(parts) > 1:
                 sentence, remainder = parts[0], parts[1]
-                await self._tts.send_text_chunk(sentence + " ", flush=True)
+                await tts.send_text_chunk(sentence + " ", flush=True)
                 buffer = remainder
         # Flush remaining buffer
         if buffer.strip():
-            await self._tts.send_text_chunk(buffer, flush=True)
+            await tts.send_text_chunk(buffer, flush=True)
         # Signal ElevenLabs stream end
-        await self._tts.send_text_chunk("", flush=True)
+        await tts.send_text_chunk("", flush=True)
 
-    async def _tts_to_twilio(self) -> None:
+    async def _tts_to_twilio(self, tts: ElevenLabsStreamingTTS) -> None:
         """Forward audio chunks from ElevenLabs to Twilio, aborting on interruption."""
-        async for audio_chunk in self._tts.receive_audio():
+        async for audio_chunk in tts.receive_audio():
             if self._interruption.was_interrupted:
                 logger.info("Interruption mid-playback, stopping audio forward")
                 break
@@ -183,16 +180,19 @@ class VoicePipeline:
     async def _speak(self, move: AgentMove) -> str:
         collected_tokens: list[str] = []
         self._interruption.set_speaking(True)
+        tts = ElevenLabsStreamingTTS()
         try:
+            await tts.connect()
             await asyncio.gather(
-                self._gpt_to_sentences(move, collected_tokens),
-                self._tts_to_twilio(),
+                self._gpt_to_sentences(tts, move, collected_tokens),
+                self._tts_to_twilio(tts),
             )
         except Exception:
             logger.exception("Speak pipeline failed, using fallback")
             if not collected_tokens:
                 return _FALLBACK_STALL
         finally:
+            await tts.close()
             self._interruption.set_speaking(False)
         return "".join(collected_tokens)
 
