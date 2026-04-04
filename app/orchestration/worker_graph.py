@@ -41,16 +41,18 @@ class WorkerSession:
     def __init__(self, initial_state: WorkerSessionState) -> None:
         self._state = initial_state
         self._pipeline: VoicePipeline | None = None
-        self._pipeline_connected = asyncio.Event()
+        self._pipeline_done = asyncio.Event()
 
     async def run(self) -> WorkerSessionState:
         graph = build_worker_graph()
-        # The graph drives setup; VoicePipeline runs when the WebSocket connects
-        result = await graph.ainvoke(
-            self._state,
-            config={"configurable": {"thread_id": self._state.session_id}},
-        )
-        return result
+        try:
+            result = await graph.ainvoke(
+                self._state,
+                config={"configurable": {"thread_id": self._state.session_id}},
+            )
+            return result
+        finally:
+            unregister_worker(self._state.session_id)
 
     async def handle_media_stream_connected(self, websocket: WebSocket) -> None:
         bridge = TwilioBridge(websocket)
@@ -60,15 +62,17 @@ class WorkerSession:
             on_quote_received=self._on_quote_received,
             on_session_end=self._on_session_end,
         )
-        self._pipeline_connected.set()
         await self._pipeline.start()
+
+    async def wait_for_call_end(self) -> None:
+        await self._pipeline_done.wait()
 
     async def _on_quote_received(self, quote: Any) -> None:
         self._state.quotes_received.append(quote)
 
     async def _on_session_end(self, state: WorkerSessionState) -> None:
         self._state = state
-        _active_workers.pop(state.session_id, None)
+        self._pipeline_done.set()
 
 
 def build_worker_graph() -> Any:
@@ -120,3 +124,7 @@ def register_worker(session: WorkerSession) -> None:
 
 def get_active_worker(session_id: str) -> WorkerSession | None:
     return _active_workers.get(session_id)
+
+
+def unregister_worker(session_id: str) -> None:
+    _active_workers.pop(session_id, None)
