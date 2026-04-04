@@ -24,8 +24,8 @@ Hotel (Phone)
                                               │ tokens
                                               ▼
                                      ┌─────────────────┐
-                                     │  ElevenLabs TTS  │
-                                     │  (WebSocket)     │
+                                     │  OpenAI tts-1    │
+                                     │  (streaming)     │
                                      └────────┬─────────┘
                                               │ ulaw audio
                                               ▼
@@ -47,7 +47,7 @@ Memory Layer (ChromaDB + Backend API)
 - **Orchestration:** LangGraph StateGraph (worker + campaign graphs)
 - **LLM:** OpenAI GPT-4o (negotiation brain) + GPT-4o-mini (fact extraction)
 - **STT:** AssemblyAI real-time WebSocket
-- **TTS:** ElevenLabs WebSocket streaming
+- **TTS:** OpenAI tts-1 streaming
 - **Phone:** Twilio Programmable Voice
 - **Memory:** ChromaDB (vector) + backend REST API (structured)
 
@@ -107,45 +107,31 @@ ngrok http 8000
 
 Set `BASE_URL=https://abc123.ngrok.io` in your `.env`, then restart the server.
 
-**Step 2 — Start a campaign:**
+**Step 2 — Place a direct call (no database required):**
+
+```bash
+curl -X POST http://localhost:8000/voice/call \
+  -H "Content-Type: application/json" \
+  -d '{
+    "phone_number": "+1XXXXXXXXXX",
+    "hotel_id": "test-hotel",
+    "target_rate": 150.0,
+    "max_rate": 200.0,
+    "check_in": "2026-05-01",
+    "check_out": "2026-05-03",
+    "room_type": "standard"
+  }'
+```
+
+Twilio will call the number immediately. When answered, the full STT → LLM → TTS negotiation pipeline starts. All fields except `phone_number` are optional and default to the values shown above.
+
+**Step 3 — Start a campaign (requires backend data):**
 
 ```bash
 curl -X POST http://localhost:8000/api/campaigns/test-campaign-1/start
 ```
 
-This requires the backend to serve `GET /api/campaigns/test-campaign-1/targets` with hotel targets. If the backend is not yet available, use the script below instead.
-
-**Step 3 — Direct worker smoke test (no backend required):**
-
-```python
-# test_worker.py
-import asyncio
-from app.hotel.schemas import HotelTarget, WorkerSessionState
-from app.orchestration.worker_graph import WorkerSession, register_worker
-
-async def main():
-    target = HotelTarget(
-        hotel_id="hotel-test-1",
-        phone_number="+1XXXXXXXXXX",   # real hotel phone number
-        check_in="2026-05-01",
-        check_out="2026-05-03",
-        room_type="king",
-        target_rate=180.0,
-        max_rate=220.0,
-    )
-    state = WorkerSessionState(
-        session_id="test-session-1",
-        hotel_target=target,
-    )
-    session = WorkerSession(state)
-    register_worker(session)
-    result = await session.run()
-    print(result)
-
-asyncio.run(main())
-```
-
-When Twilio dials the hotel and the call connects, it will POST to `{BASE_URL}/voice/twilio-stream/test-session-1`, which opens the WebSocket and starts the full STT → LLM → TTS pipeline.
+This requires the backend to serve `GET /api/campaigns/test-campaign-1/targets` with hotel targets.
 
 ## Campaign API
 
