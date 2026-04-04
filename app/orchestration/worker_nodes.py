@@ -69,7 +69,6 @@ async def load_context_node(state: dict) -> dict:
         "debug_log": state.get("debug_log", []) + ["load_context_node complete"],
     }
 
-
 async def load_memory_node(state: dict) -> dict:
     priors = load_vendor_priors(state["vendor_name"], state["product_category"])
     working_memory = load_negotiation_working_memory_from_redis(state["negotiation_id"])
@@ -303,7 +302,6 @@ async def emit_memory_node(state: dict) -> dict:
         "working_memory": working_memory,
         "debug_log": state.get("debug_log", []) + ["emit_memory_node complete"],
     }
-
 
 async def release_lock_node(state: dict) -> dict:
     get_lock_manager().release(state["negotiation_id"], state["negotiation_id"])

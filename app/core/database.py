@@ -1,14 +1,14 @@
 import sqlite3
 from pathlib import Path
 
-import chromadb
+import redis
 
 from app.core.config import get_settings
 
 settings = get_settings()
 
 DB_PATH = Path("data/negotiations.db")
-_chroma_client = None
+_redis_client: redis.Redis | None = None
 
 
 def _ensure_column(conn: sqlite3.Connection, table_name: str, column_name: str, definition: str) -> None:
@@ -105,18 +105,10 @@ def init_db() -> None:
     conn.close()
 
 
-def get_chroma() -> chromadb.ClientAPI:
-    global _chroma_client
-    if _chroma_client is None:
-        persist_dir = Path(settings.chroma_persist_dir)
-        persist_dir.mkdir(parents=True, exist_ok=True)
-        _chroma_client = chromadb.PersistentClient(path=str(persist_dir))
-    return _chroma_client
-
-
-def get_vendor_collection() -> chromadb.Collection:
-    client = get_chroma()
-    return client.get_or_create_collection(
-        name="vendor_history",
-        metadata={"hnsw:space": "cosine"},
-    )
+def get_redis() -> redis.Redis:
+    global _redis_client
+    if _redis_client is None:
+        _redis_client = redis.Redis.from_url(
+            settings.redis_url, decode_responses=True
+        )
+    return _redis_client

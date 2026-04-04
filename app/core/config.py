@@ -33,7 +33,7 @@ class Settings(BaseSettings):
     session_lock_ttl: int = 900
 
     database_url: str = "sqlite+aiosqlite:///data/negotiations.db"
-    chroma_persist_dir: str = "data/chroma"
+    redis_url: str = "redis://localhost:6379/0"
 
     base_url: str = "http://localhost:8000"
 

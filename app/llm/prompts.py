@@ -66,8 +66,18 @@ Return valid JSON only with this shape:
   "outcome": string,
   "key_patterns": list[string],
   "best_offer": object | null,
-  "lessons": list[string]
+  "lessons": list[string],
+  "call_quality_score": number,
+  "follow_up_recommended": boolean,
+  "follow_up_reason": string
 }
+
+Requirements:
+- `summary` should be 2 to 3 sentences.
+- `outcome` should reflect the end state of the call such as accepted, escalated, rejected, callback_requested, failed, or timed_out.
+- `key_patterns` should capture concrete vendor behaviors or leverage points observed in the call.
+- `lessons` should be actionable tactics for a future negotiation with this vendor.
+- `call_quality_score` should be between 0 and 1.
 """
 
 STRATEGY_INSTRUCTIONS = {
