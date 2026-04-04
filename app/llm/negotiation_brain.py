@@ -13,23 +13,40 @@ from app.llm.prompts import NEGOTIATION_BRAIN_SYSTEM, RESPONSE_GENERATION_SYSTEM
 def _build_brain_context(session_state: WorkerSessionState) -> str:
     target = session_state.hotel_target
     lines = [
-        f"Hotel: {target.hotel_id}",
         f"Check-in: {target.check_in}, Check-out: {target.check_out}",
         f"Room type: {target.room_type}",
-        f"Target rate: ${target.target_rate}/night",
         f"Moves so far: {len(session_state.moves_made)}",
     ]
 
     if session_state.quotes_received:
         best = min(session_state.quotes_received, key=lambda q: q.nightly_rate)
         breakdown = score_hotel_quote(best, target)
-        lines.append(f"Best quote: ${best.nightly_rate}/night (score: {breakdown.total:.2f})")
+        # Score relative to target without revealing the raw target number
+        if breakdown.rate_score >= 1.0:
+            rate_assessment = "below target (excellent)"
+        elif breakdown.rate_score >= 0.6:
+            rate_assessment = "near target (acceptable)"
+        else:
+            rate_assessment = "above target (push further)"
+        lines.append(
+            f"Best quote: ${best.nightly_rate}/night — {rate_assessment} "
+            f"(overall score: {breakdown.total:.2f}/1.0)"
+        )
+        if best.inclusions:
+            lines.append(f"Inclusions: {', '.join(k for k, v in best.inclusions.items() if v)}")
+        if best.cancellation_policy:
+            lines.append(f"Cancellation: {best.cancellation_policy}")
+    else:
+        lines.append("No quotes received yet — open the negotiation.")
 
-    if session_state.behavioral_priors:
-        lines.append(f"Behavioral priors: {json.dumps(session_state.behavioral_priors)}")
+    # Include only negotiation-relevant priors, not raw API dumps
+    priors = session_state.behavioral_priors
+    prior_summary = priors.get("negotiation_summary")
+    if prior_summary:
+        lines.append(f"Prior call patterns: {prior_summary}")
 
     transcript_lines = session_state.transcript[-6:] if len(session_state.transcript) >= 6 else session_state.transcript
-    lines.append("\nRecent transcript:")
+    lines.append("\nRecent conversation:")
     for t in transcript_lines:
         lines.append(f"  {t['role']}: {t['content']}")
 
@@ -67,7 +84,6 @@ async def generate_response_streaming(
     user_prompt = (
         f"Move type: {move.move_type.value}\n"
         f"{counter_hint}"
-        f"Internal reasoning: {move.reasoning}\n\n"
         f"Recent conversation:\n{transcript_text}"
     )
 

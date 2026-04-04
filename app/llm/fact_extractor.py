@@ -11,11 +11,12 @@ async def extract_facts_from_utterance(
     utterance: str,
     session_state: WorkerSessionState,
 ) -> HotelQuote | None:
-    # Include last 4 transcript turns as context
+    # The utterance is already the last item in the transcript (appended before this call).
+    # Use the last 4 turns for context — the final hotel turn is the one to extract from.
     recent = session_state.transcript[-4:] if len(session_state.transcript) >= 4 else session_state.transcript
     context_lines = "\n".join(f"{t['role']}: {t['content']}" for t in recent)
 
-    user_prompt = f"Recent conversation:\n{context_lines}\n\nLatest hotel rep utterance:\n{utterance}"
+    user_prompt = f"Conversation so far:\n{context_lines}"
 
     try:
         data = await invoke_json(FACT_EXTRACTION_SYSTEM, user_prompt, temperature=0.0)
@@ -33,5 +34,4 @@ async def extract_facts_from_utterance(
         rate_type=data.get("rate_type") or "",
         fees=float(data.get("fees") or 0),
         raw_text=data.get("raw_text") or utterance,
-        confidence=float(data.get("confidence") or 1.0),
     )

@@ -35,10 +35,20 @@ async def load_context_node(state: WorkerSessionState) -> dict:
             logger.warning("load_context: failed to fetch quotes for %s: %s", hotel_id, exc)
             prior_quotes = []
 
+    # Distill only negotiation-relevant fields — not the full API response
+    prior_low = min((q.get("nightly_rate", 0) for q in prior_quotes if q.get("nightly_rate")), default=None)
+    prior_count = len(prior_quotes)
+
+    negotiation_summary = None
+    if prior_count > 0 and prior_low is not None:
+        negotiation_summary = (
+            f"{prior_count} prior quote(s) on record. "
+            f"Lowest historical rate: ${prior_low:.2f}/night."
+        )
+
     return {
         "behavioral_priors": {
-            "hotel_meta": hotel_data,
-            "prior_quotes": prior_quotes,
+            "negotiation_summary": negotiation_summary,
         }
     }
 
@@ -156,6 +166,8 @@ async def post_call_node(state: WorkerSessionState) -> dict:
                 "outcome": outcome,
                 "transcript": state.transcript,
                 "summary": data.get("summary", ""),
+                "key_patterns": data.get("key_patterns", []),
+                "lessons": data.get("lessons", []),
             })
 
         return {"status": SessionStatus.COMPLETED, "outcome": outcome}
