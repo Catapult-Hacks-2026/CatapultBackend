@@ -72,6 +72,8 @@ ELEVENLABS_MODEL_ID=eleven_turbo_v2_5
 TWILIO_ACCOUNT_SID=AC...
 TWILIO_AUTH_TOKEN=...
 TWILIO_PHONE_NUMBER=+1...
+TWILIO_TO_PHONE_NUMBER=+1...
+TWILIO_TO_PHONE_NUMBERS=+1..., +1...
 
 # Public URL — must be reachable by Twilio (see Testing section)
 BASE_URL=https://your-ngrok-url.ngrok.io
@@ -144,6 +146,8 @@ Copy `.env.example` to `.env` and fill in the values:
 | `TWILIO_ACCOUNT_SID` | Twilio account SID |
 | `TWILIO_AUTH_TOKEN` | Twilio auth token |
 | `TWILIO_PHONE_NUMBER` | Twilio phone number for outbound calls |
+| `TWILIO_TO_PHONE_NUMBER` | Default destination phone number for outbound Twilio calls |
+| `TWILIO_TO_PHONE_NUMBERS` | Comma-separated destination phone numbers for ad hoc multi-call launch scripts |
 | `TTS_API_KEY` | ElevenLabs API key for text-to-speech |
 | `TTS_VOICE_ID` | ElevenLabs voice ID |
 | `DATABASE_URL` | SQLite connection string (default: `sqlite+aiosqlite:///data/negotiations.db`) |

@@ -23,12 +23,17 @@ def _backend_url(path: str) -> str:
     return f"{get_settings().base_url}{path}"
 
 
+def _merge_state(state: dict, updates: dict) -> dict:
+    return {**state, **updates}
+
+
 # ---------------------------------------------------------------------------
 # Ingest
 # ---------------------------------------------------------------------------
 
 async def ingest_targets_node(state: dict) -> dict:
     campaign_id = state["campaign_id"]
+    logger.info("ingest_targets: loading targets for campaign %s", campaign_id)
     async with httpx.AsyncClient() as client:
         try:
             resp = await client.get(_backend_url(f"/api/campaigns/{campaign_id}/targets"))
@@ -47,11 +52,12 @@ async def ingest_targets_node(state: dict) -> dict:
 
     existing: dict[str, HotelTarget] = state.get("target_jobs", {})
     existing.update(target_jobs)
+    logger.info("ingest_targets: campaign %s loaded %d target(s)", campaign_id, len(existing))
 
-    return {
+    return _merge_state(state, {
         "target_jobs": existing,
         "queued_jobs": [(0.0, t) for t in existing.values()],
-    }
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -87,7 +93,7 @@ async def deduplicate_node(state: dict) -> dict:
         seen[key] = target
         deduped.append((score, target))
 
-    return {"queued_jobs": deduped}
+    return _merge_state(state, {"queued_jobs": deduped})
 
 
 # ---------------------------------------------------------------------------
@@ -111,7 +117,7 @@ async def load_market_state_node(state: dict) -> dict:
         except Exception as exc:
             logger.warning("load_market_state: /api/market/signals failed: %s", exc)
 
-    return {"market_state": {**market, "signals": signals}}
+    return _merge_state(state, {"market_state": {**market, "signals": signals}})
 
 
 # ---------------------------------------------------------------------------
@@ -132,7 +138,7 @@ async def score_and_prioritize_node(state: dict) -> dict:
         scored.append((priority, target))
 
     scored.sort(key=lambda x: x[0], reverse=True)
-    return {"queued_jobs": scored}
+    return _merge_state(state, {"queued_jobs": scored})
 
 
 # ---------------------------------------------------------------------------
@@ -185,10 +191,18 @@ async def check_eligibility_node(state: dict) -> dict:
         eligible.append((score, target))
         concurrency_remaining -= 1
 
-    return {
+    logger.info(
+        "check_eligibility: campaign %s eligible=%d deferred=%d active=%d",
+        state.get("campaign_id", ""),
+        len(eligible),
+        len(deferred),
+        len(active_workers),
+    )
+
+    return _merge_state(state, {
         "queued_jobs": eligible,
         "_deferred_jobs": deferred,
-    }
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -219,13 +233,19 @@ async def spawn_workers_node(state: dict) -> dict:
         task = asyncio.create_task(session.run(), name=f"worker-{session_id}")
         _worker_tasks[session_id] = task
         active_workers[session_id] = SessionStatus.INITIALIZING
-        logger.info("Spawned worker %s for hotel %s", session_id, target.hotel_id)
+        logger.info(
+            "spawn_workers: spawned worker session_id=%s campaign_id=%s hotel_id=%s phone=%s",
+            session_id,
+            campaign_id,
+            target.hotel_id,
+            target.phone_number,
+        )
 
     # queued_jobs consumed — workers are now active
-    return {
+    return _merge_state(state, {
         "active_workers": active_workers,
         "queued_jobs": [],
-    }
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -239,6 +259,11 @@ async def monitor_workers_node(state: dict) -> dict:
     retry_queue: list[tuple[HotelTarget, int]] = list(state.get("retry_queue", []))
 
     still_active: dict[str, str] = {}
+    logger.info(
+        "monitor_workers: campaign %s inspecting %d active worker(s)",
+        state.get("campaign_id", ""),
+        len(active_workers),
+    )
 
     for session_id, status in active_workers.items():
         task = _worker_tasks.get(session_id)
@@ -261,6 +286,15 @@ async def monitor_workers_node(state: dict) -> dict:
             ))
         else:
             result: WorkerSessionState = task.result()
+            logger.info(
+                "monitor_workers: worker finished session_id=%s status=%s outcome=%s call_sid=%s turns=%d quotes=%d",
+                result.session_id,
+                result.status,
+                result.outcome,
+                result.call_sid,
+                len(result.transcript),
+                len(result.quotes_received),
+            )
             best = min(result.quotes_received, key=lambda q: q.nightly_rate, default=None)
             worker_result = WorkerResult(
                 session_id=result.session_id,
@@ -278,12 +312,12 @@ async def monitor_workers_node(state: dict) -> dict:
             else:
                 failed_jobs.append(worker_result)
 
-    return {
+    return _merge_state(state, {
         "active_workers": still_active,
         "completed_jobs": completed_jobs,
         "failed_jobs": failed_jobs,
         "retry_queue": retry_queue,
-    }
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -313,12 +347,20 @@ async def handle_outcomes_node(state: dict) -> dict:
 
     # Merge deferred back into queue for next cycle
     next_queue = deferred + promotable
+    logger.info(
+        "handle_outcomes: campaign %s next_queue=%d failed=%d retryable=%d deferred=%d",
+        state.get("campaign_id", ""),
+        len(next_queue),
+        len(failed_jobs) + len(exhausted),
+        len(promotable),
+        len(deferred),
+    )
 
-    return {
+    return _merge_state(state, {
         "queued_jobs": next_queue,
         "retry_queue": [],
         "failed_jobs": failed_jobs + exhausted,
-    }
+    })
 
 
 def route_campaign(state: dict) -> str:
@@ -356,4 +398,6 @@ async def emit_summary_node(state: dict) -> dict:
         except Exception as exc:
             logger.error("emit_summary: POST failed: %s", exc)
 
-    return {"system_status": "done"}
+    logger.info("emit_summary: campaign %s summary=%s", campaign_id, summary)
+
+    return _merge_state(state, {"system_status": "done"})

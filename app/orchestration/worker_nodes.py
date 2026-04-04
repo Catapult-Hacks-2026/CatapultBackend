@@ -80,12 +80,35 @@ async def start_voice_node(state: WorkerSessionState) -> dict:
     settings = get_settings()
     try:
         from twilio.rest import Client as TwilioClient
+        destination_number = state.hotel_target.phone_number or settings.twilio_to_phone_number
+        if not destination_number:
+            raise ValueError("No outbound destination configured. Set hotel_target.phone_number or TWILIO_TO_PHONE_NUMBER.")
         client = TwilioClient(settings.twilio_account_sid, settings.twilio_auth_token)
         twiml_url = f"{settings.base_url}/voice/twilio-stream/{state.session_id}"
+        status_callback_url = f"{settings.base_url}/voice/status/{state.session_id}"
+        logger.info(
+            "start_voice_node: creating Twilio call session_id=%s campaign_id=%s hotel_id=%s to=%s from=%s twiml_url=%s status_callback_url=%s",
+            state.session_id,
+            state.campaign_id,
+            state.hotel_target.hotel_id,
+            destination_number,
+            settings.twilio_phone_number,
+            twiml_url,
+            status_callback_url,
+        )
         call = client.calls.create(
-            to=state.hotel_target.phone_number,
+            to=destination_number,
             from_=settings.twilio_phone_number,
             url=twiml_url,
+            status_callback=status_callback_url,
+            status_callback_event=["initiated", "ringing", "answered", "completed"],
+            status_callback_method="POST",
+        )
+        logger.info(
+            "start_voice_node: Twilio call created session_id=%s call_sid=%s status=%s",
+            state.session_id,
+            call.sid,
+            getattr(call, "status", None),
         )
         # Emit WORKER_STARTED event
         await get_event_bus().publish(WorkerEvent(
@@ -119,7 +142,30 @@ async def listen_node(state: WorkerSessionState) -> dict:
         )
         return {"status": SessionStatus.FAILED, "error_log": state.error_log + ["lock expired"]}
     # VoicePipeline drives the listen/respond cycle via handle_media_stream_connected()
-    return {}
+    logger.info(
+        "listen_node: awaiting media stream session_id=%s hotel_id=%s call_sid=%s status=%s",
+        state.session_id,
+        state.hotel_target.hotel_id,
+        state.call_sid,
+        state.status,
+    )
+    from app.orchestration.worker_graph import get_active_worker
+
+    worker = get_active_worker(state.session_id)
+    if worker is None:
+        logger.warning("listen_node: no active worker found for session %s", state.session_id)
+        return {"status": SessionStatus.FAILED, "error_log": state.error_log + ["worker missing"]}
+
+    await worker.wait_for_call_end()
+    logger.info(
+        "listen_node: call ended session_id=%s hotel_id=%s transcript_turns=%d quotes=%d outcome=%s",
+        state.session_id,
+        state.hotel_target.hotel_id,
+        len(state.transcript),
+        len(state.quotes_received),
+        state.outcome,
+    )
+    return {"status": SessionStatus.COMPLETED}
 
 
 async def extract_facts_node(state: WorkerSessionState) -> dict:

@@ -1,3 +1,4 @@
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket
@@ -8,9 +9,15 @@ from app.galileo.database import init_galileo_db
 from app.galileo.router import router as galileo_router
 from app.galileo.seed import seed_galileo_data
 from app.routers.campaigns import router as campaigns_router
+from app.routers.hotel_data import router as hotel_data_router
 from app.routers.negotiations import router as negotiations_router
 from app.routers.voice import router as voice_router
 from app.routers.webhooks import router as webhooks_router
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
+)
 
 
 class ConnectionManager:
@@ -63,6 +70,7 @@ app.include_router(negotiations_router, prefix="/negotiations", tags=["negotiati
 app.include_router(webhooks_router, prefix="/webhooks", tags=["webhooks"])
 app.include_router(voice_router, prefix="/voice", tags=["voice"])
 app.include_router(campaigns_router, prefix="/api", tags=["campaigns"])
+app.include_router(hotel_data_router, prefix="/api/hotel-data", tags=["hotel-data"])
 app.include_router(galileo_router, prefix="/api/galileo", tags=["galileo"])
 
 

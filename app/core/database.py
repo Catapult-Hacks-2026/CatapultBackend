@@ -97,6 +97,28 @@ def init_db() -> None:
             expires_at TIMESTAMP NOT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
+
+        CREATE TABLE IF NOT EXISTS historic_pricing (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            hotel TEXT NOT NULL,
+            location TEXT NOT NULL,
+            month INTEGER NOT NULL,
+            year INTEGER NOT NULL,
+            price_per_night REAL NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS past_negotiations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            hotel TEXT NOT NULL,
+            location TEXT NOT NULL,
+            month INTEGER NOT NULL,
+            year INTEGER NOT NULL,
+            starting_price REAL NOT NULL,
+            negotiation_price REAL NOT NULL,
+            proposed_price REAL NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
         """
     )
     _ensure_column(conn, "negotiations", "product_category", "TEXT NOT NULL DEFAULT 'general'")

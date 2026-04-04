@@ -17,9 +17,12 @@ settings = get_settings()
 
 
 def initiate_call(negotiation_id: str, vendor_phone_number: str) -> dict:
+    destination_number = vendor_phone_number or settings.twilio_to_phone_number
+    if not destination_number:
+        raise ValueError("No outbound destination configured. Set vendor_phone_number or TWILIO_TO_PHONE_NUMBER.")
     client = Client(settings.twilio_account_sid, settings.twilio_auth_token)
     call = client.calls.create(
-        to=vendor_phone_number,
+        to=destination_number,
         from_=settings.twilio_phone_number,
         url=f"{settings.base_url}/voice/twilio-stream/{negotiation_id}",
     )
