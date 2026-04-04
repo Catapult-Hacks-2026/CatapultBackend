@@ -4,6 +4,7 @@ from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.database import init_db
+from app.routers.campaigns import router as campaigns_router
 from app.routers.negotiations import router as negotiations_router
 from app.routers.voice import router as voice_router
 from app.routers.webhooks import router as webhooks_router
@@ -39,6 +40,7 @@ manager = ConnectionManager()
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     init_db()
+    # Campaign graph is built on demand per campaign via POST /campaigns/{id}/start
     yield
 
 
@@ -53,6 +55,7 @@ app.add_middleware(
 app.include_router(negotiations_router, prefix="/negotiations", tags=["negotiations"])
 app.include_router(webhooks_router, prefix="/webhooks", tags=["webhooks"])
 app.include_router(voice_router, prefix="/voice", tags=["voice"])
+app.include_router(campaigns_router, prefix="/api", tags=["campaigns"])
 
 
 @app.get("/")
