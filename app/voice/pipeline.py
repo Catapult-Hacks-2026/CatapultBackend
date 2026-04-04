@@ -90,26 +90,32 @@ class VoicePipeline:
         async with self._processing_lock:
             await self._process_utterance(text, confidence)
 
+    async def _run_fact_extraction(self, text: str) -> HotelQuote | None:
+        try:
+            return await extract_facts_from_utterance(text, self._state)
+        except Exception:
+            logger.exception("Fact extraction failed")
+            return None
+
     async def _process_utterance(self, text: str, confidence: float) -> None:
         from app.hotel.enums import SessionStatus
 
         self._state.transcript.append({"role": "hotel", "content": text})
         self._state.status = SessionStatus.ACTIVE
 
-        # Fact extraction
-        quote = None
-        try:
-            quote = await extract_facts_from_utterance(text, self._state)
-        except Exception:
-            logger.exception("Fact extraction failed")
+        # Run fact extraction and move decision in parallel.
+        # decide_move reads quotes_received but a quote from *this* utterance
+        # arriving 300ms later is acceptable — the move decision uses prior quotes.
+        # The new quote is appended before the next turn so it informs future moves.
+        quote, move = await asyncio.gather(
+            self._run_fact_extraction(text),
+            self._decide_with_guardrails(),
+        )
 
         if quote is not None:
             self._state.quotes_received.append(quote)
             if self._on_quote_received:
                 await self._on_quote_received(quote)
-
-        # Decide move with guardrail retry
-        move = await self._decide_with_guardrails()
 
         # Stream response: GPT-4o -> ElevenLabs -> Twilio
         response_text = await self._speak(move)
@@ -139,23 +145,32 @@ class VoicePipeline:
             reasoning="guardrail fallback",
         )
 
+    async def _stream_tokens_to_tts(self, move: AgentMove, tokens: list[str]) -> None:
+        """Feed GPT-4o tokens to ElevenLabs as they arrive, then signal end."""
+        token_stream = await generate_response_streaming(move, self._state)
+        async for token in token_stream:
+            tokens.append(token)
+            await self._tts.send_text_chunk(token)
+        # Empty string signals ElevenLabs to flush and finalize audio
+        await self._tts.send_text_chunk("", flush=True)
+
+    async def _forward_audio_to_twilio(self) -> None:
+        """Forward ElevenLabs audio chunks to Twilio as they arrive."""
+        async for audio_chunk in self._tts.receive_audio():
+            await self._bridge.send_audio(audio_chunk)
+
     async def _speak(self, move: AgentMove) -> str:
         collected_tokens: list[str] = []
         try:
-            token_stream = await generate_response_streaming(move, self._state)
-            async for token in token_stream:
-                collected_tokens.append(token)
-                await self._tts.send_text_chunk(token)
-
-            await self._tts.send_text_chunk("", flush=True)
-
-            async for audio_chunk in self._tts.receive_audio():
-                await self._bridge.send_audio(audio_chunk)
-
+            # Run token streaming and audio forwarding concurrently.
+            # ElevenLabs starts synthesizing as soon as the first tokens arrive —
+            # it does not wait for GPT-4o to finish the full response.
+            await asyncio.gather(
+                self._stream_tokens_to_tts(move, collected_tokens),
+                self._forward_audio_to_twilio(),
+            )
         except Exception:
             logger.exception("Speak pipeline failed, using TwiML fallback")
-            # ElevenLabs failure: fall back text is returned but audio is not sent
-            # The worker node can use Twilio <Say> as fallback
             if not collected_tokens:
                 return _FALLBACK_STALL
 
