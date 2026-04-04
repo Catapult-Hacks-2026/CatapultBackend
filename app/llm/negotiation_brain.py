@@ -55,7 +55,10 @@ def _build_brain_context(session_state: WorkerSessionState) -> str:
 
 async def decide_move(session_state: WorkerSessionState) -> AgentMove:
     context = _build_brain_context(session_state)
-    data = await invoke_json(NEGOTIATION_BRAIN_SYSTEM, context, temperature=0.2)
+    data = await invoke_json(
+        NEGOTIATION_BRAIN_SYSTEM, context,
+        model="gpt-4o-mini", temperature=0.2, max_tokens=256,
+    )
 
     move_type = MoveType(data.get("move_type", MoveType.PROBE))
     counter_rate = data.get("counter_rate")
@@ -87,4 +90,4 @@ async def generate_response_streaming(
         f"Recent conversation:\n{transcript_text}"
     )
 
-    return stream_text(RESPONSE_GENERATION_SYSTEM, user_prompt)
+    return stream_text(RESPONSE_GENERATION_SYSTEM, user_prompt, max_tokens=200)

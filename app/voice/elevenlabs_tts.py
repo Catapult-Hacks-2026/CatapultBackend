@@ -27,6 +27,7 @@ class ElevenLabsStreamingTTS:
         return (
             f"wss://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream-input"
             f"?model_id={model_id}&output_format=ulaw_8000"
+            f"&optimize_streaming_latency=3"
         )
 
     async def _open_connection(self) -> None:
@@ -40,7 +41,7 @@ class ElevenLabsStreamingTTS:
             "voice_settings": {
                 "stability": 0.5,
                 "similarity_boost": 0.8,
-                "use_speaker_boost": True,
+                "use_speaker_boost": False,
             },
             "xi_api_key": settings.tts_api_key,
         }))

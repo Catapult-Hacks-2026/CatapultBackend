@@ -23,6 +23,7 @@ _FALLBACK_STALL = "Let me check on that for you."
 
 # Sentence boundary pattern — flush to TTS at these boundaries for lower latency
 _SENTENCE_END = re.compile(r'(?<=[.!?])\s+')
+_CLAUSE_END = re.compile(r'(?<=[,;:\u2014])\s+')
 
 
 class VoicePipeline:
@@ -170,6 +171,14 @@ class VoicePipeline:
                 sentence, remainder = parts[0], parts[1]
                 await self._tts.send_text_chunk(sentence + " ", flush=True)
                 buffer = remainder
+                continue
+            # Fall back to clause boundary for early first flush
+            if len(buffer) >= 40:
+                clause_parts = _CLAUSE_END.split(buffer, maxsplit=1)
+                if len(clause_parts) > 1:
+                    clause, remainder = clause_parts[0], clause_parts[1]
+                    await self._tts.send_text_chunk(clause + " ", flush=True)
+                    buffer = remainder
         # Flush remaining buffer
         if buffer.strip():
             await self._tts.send_text_chunk(buffer, flush=True)
