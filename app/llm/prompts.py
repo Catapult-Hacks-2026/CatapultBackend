@@ -52,10 +52,13 @@ POST_CALL_ANALYSIS_SYSTEM = """\
 You are analyzing a completed hotel rate negotiation call. Extract key insights and \
 behavioral patterns that will improve future negotiations with this hotel.
 
-Return a JSON object:
+Return a JSON object with these fields:
 - summary: 2-3 sentence summary of the call outcome
 - outcome: one of rate_confirmed, callback_requested, no_availability, escalated_to_human, failed, timed_out
-- key_patterns: list of observed behavioral patterns
-- best_quote: the best rate offered (or null)
-- lessons: list of actionable insights for future calls
+- key_patterns: list of specific behavioral patterns observed (e.g. "dropped rate when competitor mentioned", \
+"front desk could not go below $180")
+- lessons: list of concrete, actionable tactics for the next call with this hotel
+- call_quality_score: float 0-1 rating how effectively the agent negotiated
+- follow_up_recommended: boolean — true if a follow-up call is likely to yield a better rate
+- follow_up_reason: string explaining why follow-up is or is not recommended
 """

@@ -54,8 +54,14 @@ async def load_context_node(state: WorkerSessionState) -> dict:
 
 
 async def load_memory_node(state: WorkerSessionState) -> dict:
-    # Phase 2 will populate this from BehavioralStore; stub for Phase 1
-    return {}
+    from app.memory.behavioral_store import get_behavioral_store
+    store = get_behavioral_store()
+    profile = await store.load_priors(state.hotel_target.hotel_id)
+    return {
+        "behavioral_priors": {
+            "negotiation_summary": profile.to_prompt_context(),
+        }
+    }
 
 
 async def acquire_lock_node(state: WorkerSessionState) -> dict:
@@ -148,36 +154,58 @@ def route_terminate(state: WorkerSessionState) -> str:
 
 
 async def post_call_node(state: WorkerSessionState) -> dict:
-    from app.llm.openai_client import invoke_json
-    from app.llm.prompts import POST_CALL_ANALYSIS_SYSTEM
+    from app.llm.post_call_analyzer import analyze_call
+    from app.memory.behavioral_store import get_behavioral_store
 
-    transcript_text = "\n".join(f"{t['role']}: {t['content']}" for t in state.transcript)
     try:
-        data = await invoke_json(POST_CALL_ANALYSIS_SYSTEM, transcript_text, temperature=0.0)
-        outcome_str = data.get("outcome", "failed")
-        try:
-            outcome = NegotiationOutcome(outcome_str)
-        except ValueError:
-            outcome = NegotiationOutcome.FAILED
+        analysis = await analyze_call(state)
 
         async with httpx.AsyncClient() as client:
             await client.patch(_backend_url(f"/api/sessions/{state.session_id}"), json={
                 "status": SessionStatus.COMPLETED,
-                "outcome": outcome,
+                "outcome": analysis.outcome,
                 "transcript": state.transcript,
-                "summary": data.get("summary", ""),
-                "key_patterns": data.get("key_patterns", []),
-                "lessons": data.get("lessons", []),
+                "summary": analysis.summary,
+                "key_patterns": analysis.key_patterns,
+                "lessons": analysis.lessons,
+                "call_quality_score": analysis.call_quality_score,
+                "follow_up_recommended": analysis.follow_up_recommended,
+                "follow_up_reason": analysis.follow_up_reason,
             })
 
-        return {"status": SessionStatus.COMPLETED, "outcome": outcome}
+        # Store call summary in ChromaDB for future behavioral context
+        store = get_behavioral_store()
+        await store.store_call_summary(
+            session_id=state.session_id,
+            hotel_id=state.hotel_target.hotel_id,
+            summary=analysis.summary,
+            outcome=analysis.outcome,
+            quotes=state.quotes_received,
+        )
+
+        return {"status": SessionStatus.COMPLETED, "outcome": analysis.outcome}
     except Exception as exc:
         logger.exception("post_call_node failed: %s", exc)
         return {"status": SessionStatus.COMPLETED, "outcome": NegotiationOutcome.FAILED}
 
 
 async def emit_memory_node(state: WorkerSessionState) -> dict:
-    # Phase 2: emit behavioral features to BehavioralStore
+    from app.memory.behavioral_store import get_behavioral_store
+    from app.memory.memory_candidates import extract_memory_candidates
+
+    try:
+        features = await extract_memory_candidates(state)
+        if features:
+            store = get_behavioral_store()
+            await store.store_features(features)
+            logger.info(
+                "emit_memory_node: stored %d features for hotel %s",
+                len(features),
+                state.hotel_target.hotel_id,
+            )
+    except Exception:
+        logger.exception("emit_memory_node failed for session %s", state.session_id)
+
     return {}
 
 
