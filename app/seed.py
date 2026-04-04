@@ -75,6 +75,7 @@ def seed_history(count: int = 30) -> None:
         add_negotiation_to_history(
             negotiation_id=f"seed-{index}-{uuid.uuid4()}",
             vendor_name=vendor,
+            product_category=category,
             messages=messages,
             final_offer=final_offer,
             outcome=outcome,

@@ -10,7 +10,8 @@ aiosqlite==0.20.0
 
 # AI / ML
 openai>=1.40.0
-chromadb==0.5.0
+redis>=5.0.0
+chromadb==0.5.0  # kept for one-time migration of legacy data to Redis
 numpy==2.0.2
 langgraph>=0.2.0
 langchain-openai>=0.2.0

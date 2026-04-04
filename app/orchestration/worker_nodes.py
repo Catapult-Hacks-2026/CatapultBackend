@@ -109,6 +109,15 @@ async def start_voice_node(state: WorkerSessionState) -> dict:
 
 
 async def listen_node(state: WorkerSessionState) -> dict:
+    # Renew the session lock at the start of each turn so it doesn't expire
+    # during long listen phases (hold music, vendor pauses, etc.).
+    manager = get_lock_manager()
+    if not manager.renew(state.hotel_target.hotel_id, state.session_id):
+        logger.warning(
+            "listen_node: lock renewal failed for hotel %s session %s, terminating",
+            state.hotel_target.hotel_id, state.session_id,
+        )
+        return {"status": SessionStatus.FAILED, "error_log": state.error_log + ["lock expired"]}
     # VoicePipeline drives the listen/respond cycle via handle_media_stream_connected()
     return {}
 
@@ -198,6 +207,13 @@ async def speak_node(state: WorkerSessionState) -> dict:
 
 
 async def check_terminate_node(state: WorkerSessionState) -> dict:
+    manager = get_lock_manager()
+    if not manager.renew(state.hotel_target.hotel_id, state.session_id):
+        logger.warning(
+            "check_terminate: lock renewal failed for hotel %s session %s, terminating",
+            state.hotel_target.hotel_id, state.session_id,
+        )
+        return {"status": SessionStatus.FAILED, "error_log": state.error_log + ["lock expired"]}
     return {}
 
 
@@ -212,6 +228,28 @@ def route_terminate(state: WorkerSessionState) -> str:
 
 
 async def post_call_node(state: WorkerSessionState) -> dict:
+    # If the lock was lost, only mark the session as failed and emit the
+    # event — skip analysis, summaries, and memory writes that could
+    # conflict with a replacement worker that now owns this hotel.
+    if "lock expired" in state.error_log:
+        logger.info("post_call_node: lock lost for session %s, marking failed", state.session_id)
+        async with httpx.AsyncClient() as client:
+            try:
+                await client.patch(_backend_url(f"/api/sessions/{state.session_id}"), json={
+                    "status": SessionStatus.FAILED,
+                    "outcome": NegotiationOutcome.FAILED,
+                })
+            except Exception as exc:
+                logger.warning("post_call_node: failed to patch session status: %s", exc)
+        await get_event_bus().publish(WorkerEvent(
+            event_type=EventType.WORKER_FAILED,
+            session_id=state.session_id,
+            campaign_id=state.campaign_id,
+            hotel_id=state.hotel_target.hotel_id,
+            payload={"reason": "lock expired"},
+        ))
+        return {"status": SessionStatus.FAILED, "outcome": NegotiationOutcome.FAILED}
+
     from app.llm.post_call_analyzer import analyze_call
     from app.memory.behavioral_store import get_behavioral_store
 
@@ -238,6 +276,7 @@ async def post_call_node(state: WorkerSessionState) -> dict:
             summary=analysis.summary,
             outcome=analysis.outcome,
             quotes=state.quotes_received,
+            market=state.hotel_target.market_context.get("market", ""),
         )
 
         best_rate = min((q.nightly_rate for q in state.quotes_received), default=None)
@@ -272,6 +311,9 @@ async def post_call_node(state: WorkerSessionState) -> dict:
 
 
 async def emit_memory_node(state: WorkerSessionState) -> dict:
+    if "lock expired" in state.error_log:
+        return {}
+
     from app.memory.behavioral_store import get_behavioral_store
     from app.memory.memory_candidates import extract_memory_candidates
 
