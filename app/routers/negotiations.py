@@ -188,6 +188,148 @@ def _serialize_negotiation(row) -> NegotiationResponse:
     )
 
 
+def _preview_buyer_config() -> BuyerConfig:
+    return BuyerConfig(
+        target_unit_price=185,
+        max_unit_price=240,
+        target_shipping_cost=0,
+        max_shipping_cost=0,
+        preferred_payment_terms=45,
+        min_payment_terms=30,
+        preferred_delivery_days=14,
+        max_delivery_days=30,
+        quantity=120,
+        weight_price=0.45,
+        weight_shipping=0.15,
+        weight_payment_terms=0.2,
+        weight_delivery=0.2,
+        min_acceptable_utility=0.6,
+    )
+
+
+def _preview_agents() -> list[dict]:
+    return [
+        {
+            "id": "agent-preview-1",
+            "name": "Apex Hotels",
+            "status": "negotiating",
+            "round_number": 3,
+            "current_offer": {"unit_price": 212, "payment_terms_days": 30, "delivery_days": 14},
+            "activity": "Countered after initial outreach and is waiting on manager approval.",
+        },
+        {
+            "id": "agent-preview-2",
+            "name": "Lumina Hospitality",
+            "status": "quoted",
+            "round_number": 2,
+            "current_offer": {"unit_price": 205, "payment_terms_days": 45, "delivery_days": 10},
+            "activity": "Shared a revised rate with breakfast included.",
+        },
+        {
+            "id": "agent-preview-3",
+            "name": "Coastal Inn Collection",
+            "status": "researching",
+            "round_number": 1,
+            "current_offer": {"unit_price": 224, "payment_terms_days": 30, "delivery_days": 21},
+            "activity": "Reviewing competitor comps before the next concession.",
+        },
+        {
+            "id": "agent-preview-4",
+            "name": "Vanguard Suites",
+            "status": "escalated",
+            "round_number": 4,
+            "current_offer": {"unit_price": 198, "payment_terms_days": 60, "delivery_days": 7},
+            "activity": "Reached a regional sales manager for final approval.",
+        },
+        {
+            "id": "agent-preview-5",
+            "name": "Skyline Business Hotel",
+            "status": "queued",
+            "round_number": 0,
+            "current_offer": None,
+            "activity": "Prepared outreach sequence and queued for contact.",
+        },
+    ]
+
+
+def _preview_messages() -> list[dict]:
+    created_at = datetime.now(UTC).isoformat()
+    return [
+        {
+            "id": 1,
+            "role": "system",
+            "content": "Preview negotiation initialized with 5 agents.",
+            "structured_data": {"agents_active": 5},
+            "utility_score": None,
+            "rag_context": None,
+            "guardrail_log": None,
+            "created_at": created_at,
+        },
+        {
+            "id": 2,
+            "role": "agent",
+            "content": "Apex Hotels countered at $212/night after procurement cited Chicago comps.",
+            "structured_data": {"agent_id": "agent-preview-1", "vendor_name": "Apex Hotels"},
+            "utility_score": 0.49,
+            "rag_context": None,
+            "guardrail_log": None,
+            "created_at": created_at,
+        },
+        {
+            "id": 3,
+            "role": "agent",
+            "content": "Lumina Hospitality offered $205/night with breakfast and 45-day terms.",
+            "structured_data": {"agent_id": "agent-preview-2", "vendor_name": "Lumina Hospitality"},
+            "utility_score": 0.61,
+            "rag_context": None,
+            "guardrail_log": None,
+            "created_at": created_at,
+        },
+        {
+            "id": 4,
+            "role": "agent",
+            "content": "Vanguard Suites escalated internally and is holding at $198/night.",
+            "structured_data": {"agent_id": "agent-preview-4", "vendor_name": "Vanguard Suites"},
+            "utility_score": 0.77,
+            "rag_context": None,
+            "guardrail_log": None,
+            "created_at": created_at,
+        },
+    ]
+
+
+def _preview_negotiation_payload() -> dict:
+    config = _preview_buyer_config()
+    current_offer = VendorOffer(
+        unit_price=198,
+        shipping_cost=0,
+        payment_terms_days=60,
+        delivery_days=7,
+        notes="Preview best active offer from Vanguard Suites",
+    )
+    negotiation = NegotiationResponse(
+        id="new",
+        vendor_name="Preview Multi-Agent Negotiation",
+        product_category="hotel",
+        status="preview",
+        strategy="balanced",
+        round_number=4,
+        utility_score=0.77,
+        current_offer=current_offer,
+    )
+    return {
+        "negotiation": negotiation.model_dump(),
+        "research_brief": {
+            "summary": "Preview payload for the new negotiation screen.",
+            "recommended_supplier": "Vanguard Suites",
+            "market_note": "Chicago shoulder-season rates are softening relative to prior quarter.",
+        },
+        "config": config.model_dump(),
+        "messages": _preview_messages(),
+        "agents": _preview_agents(),
+    }
+
+
 @router.post("/", response_model=NegotiationResponse)
 def create_negotiation(
     request: CreateNegotiationRequest,
@@ -259,6 +401,9 @@ def list_negotiations() -> list[NegotiationResponse]:
 
 @router.get("/{negotiation_id}")
 def get_negotiation(negotiation_id: str) -> dict:
+    if negotiation_id == "new":
+        return _preview_negotiation_payload()
+
     conn = get_db()
     row = conn.execute("SELECT * FROM negotiations WHERE id = ?", (negotiation_id,)).fetchone()
     if row is None:
@@ -291,6 +436,9 @@ def get_negotiation(negotiation_id: str) -> dict:
 
 @router.get("/{negotiation_id}/messages")
 def get_messages(negotiation_id: str) -> list[dict]:
+    if negotiation_id == "new":
+        return _preview_messages()
+
     conn = get_db()
     rows = conn.execute(
         "SELECT * FROM messages WHERE negotiation_id = ? ORDER BY created_at, id",
@@ -314,6 +462,22 @@ def get_messages(negotiation_id: str) -> list[dict]:
 
 @router.get("/{negotiation_id}/scoring")
 def get_scoring(negotiation_id: str) -> dict:
+    if negotiation_id == "new":
+        config = _preview_buyer_config()
+        current_offer = VendorOffer(
+            unit_price=198,
+            shipping_cost=0,
+            payment_terms_days=60,
+            delivery_days=7,
+            notes="Preview best active offer from Vanguard Suites",
+        )
+        breakdown = score_offer(current_offer, config)
+        return {
+            "scoring_breakdown": breakdown.model_dump(),
+            "pivot_suggestions": suggest_pivot(current_offer, config, breakdown),
+            "status": "preview",
+        }
+
     conn = get_db()
     row = conn.execute("SELECT * FROM negotiations WHERE id = ?", (negotiation_id,)).fetchone()
     conn.close()

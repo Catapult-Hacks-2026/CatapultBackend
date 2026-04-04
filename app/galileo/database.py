@@ -916,7 +916,7 @@ async def get_enterprise_company_view(
             "lifetimeSavings": round(lifetime_savings, 2),
             "savingsDelta": round(savings_delta, 2),
             "agreementsCount": agreements_count,
-            "agreementsSummary": f"{agreements_count} accepted agreements across {len(events_by_id)} linked events",
+            "agreementsSummary": f"{agreements_count} accepted agreements across {total_bookings} linked events",
             "avgDelta": round(avg_delta, 2),
             "totalBookings": total_bookings,
             "totalSavings": round(total_savings, 2),

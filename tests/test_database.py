@@ -51,6 +51,8 @@ class DatabaseTests(unittest.TestCase):
             patch.object(database, "DB_PATH", self.db_path),
             patch("app.memory.behavioral_store.migrate_call_history_from_chroma"),
             patch("app.services.rag.migrate_from_chroma"),
+            patch("app.services.market_data.seed_market_data"),
+            patch("app.services.market_data.sync_market_data_to_redis"),
         ):
             database.init_db()
 

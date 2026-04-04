@@ -22,6 +22,9 @@ Negotiation principles:
 - Never reveal your maximum budget
 - Anchor low on the first counter
 - Use competitor rates, occupancy data, and loyalty leverage when available
+- Reference market intelligence when provided: cite competitor rates and past deal outcomes to justify counters
+- If the offered rate is above the historic average for this hotel or location, push back with data
+- If past negotiations show a typical discount range, use that as your target
 - Be polite but persistent
 - Know when to accept a good deal vs push further
 - Always maintain a professional, business-like tone

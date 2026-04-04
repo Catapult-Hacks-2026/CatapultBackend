@@ -45,6 +45,11 @@ def _build_brain_context(session_state: WorkerSessionState) -> str:
     if prior_summary:
         lines.append(f"Prior call patterns: {prior_summary}")
 
+    # Market intelligence: historic rates and past deal outcomes from Redis
+    market_brief = priors.get("market_brief")
+    if market_brief:
+        lines.append(f"\n{market_brief}")
+
     transcript_lines = session_state.transcript[-6:] if len(session_state.transcript) >= 6 else session_state.transcript
     lines.append("\nRecent conversation:")
     for t in transcript_lines:
@@ -53,9 +58,20 @@ def _build_brain_context(session_state: WorkerSessionState) -> str:
     return "\n".join(lines)
 
 
-async def decide_move(session_state: WorkerSessionState) -> AgentMove:
+async def decide_move(
+    session_state: WorkerSessionState,
+    guardrail_feedback: str | None = None,
+) -> AgentMove:
     context = _build_brain_context(session_state)
-    data = await invoke_json(NEGOTIATION_BRAIN_SYSTEM, context, temperature=0.2)
+    if guardrail_feedback:
+        context += (
+            f"\n\nIMPORTANT — your previous response was REJECTED by guardrails: "
+            f"{guardrail_feedback}. You MUST avoid this violation in your next response."
+        )
+    data = await invoke_json(
+        NEGOTIATION_BRAIN_SYSTEM, context,
+        model="gpt-4o-mini", temperature=0.2, max_tokens=256,
+    )
 
     move_type = MoveType(data.get("move_type", MoveType.PROBE))
     counter_rate = data.get("counter_rate")
@@ -87,4 +103,4 @@ async def generate_response_streaming(
         f"Recent conversation:\n{transcript_text}"
     )
 
-    return stream_text(RESPONSE_GENERATION_SYSTEM, user_prompt)
+    return stream_text(RESPONSE_GENERATION_SYSTEM, user_prompt, max_tokens=200)

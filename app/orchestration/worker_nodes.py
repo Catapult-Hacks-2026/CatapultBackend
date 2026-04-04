@@ -46,9 +46,26 @@ async def load_context_node(state: WorkerSessionState) -> dict:
             f"Lowest historical rate: ${prior_low:.2f}/night."
         )
 
+    # Fetch market intelligence from Redis (historic rates + past deals)
+    from app.services.market_data import get_market_context
+    market_brief = ""
+    try:
+        location = state.hotel_target.market_context.get("location", "")
+        hotel_name = state.hotel_target.market_context.get("hotel_name", hotel_id)
+        check_in_month = None
+        if state.hotel_target.check_in:
+            try:
+                check_in_month = int(state.hotel_target.check_in.split("-")[1])
+            except (IndexError, ValueError):
+                pass
+        market_brief = get_market_context(hotel_name, location, check_in_month)
+    except Exception as exc:
+        logger.warning("load_context: market data retrieval failed: %s", exc)
+
     return {
         "behavioral_priors": {
             "negotiation_summary": negotiation_summary,
+            "market_brief": market_brief,
         }
     }
 
@@ -57,10 +74,11 @@ async def load_memory_node(state: WorkerSessionState) -> dict:
     from app.memory.behavioral_store import get_behavioral_store
     store = get_behavioral_store()
     profile = await store.load_priors(state.hotel_target.hotel_id)
+    # Merge with existing priors (preserves market_brief from load_context_node)
+    merged = dict(state.behavioral_priors)
+    merged["negotiation_summary"] = profile.to_prompt_context()
     return {
-        "behavioral_priors": {
-            "negotiation_summary": profile.to_prompt_context(),
-        }
+        "behavioral_priors": merged,
     }
 
 

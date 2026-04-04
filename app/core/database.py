@@ -1,9 +1,12 @@
+import logging
 import sqlite3
 from pathlib import Path
 
 import redis
 
 from app.core.config import get_settings
+
+logger = logging.getLogger(__name__)
 
 settings = get_settings()
 
@@ -30,8 +33,23 @@ def get_db() -> sqlite3.Connection:
     return conn
 
 
+def _needs_schema_migration(conn, table: str, required_col: str) -> bool:
+    """Check if an existing table is missing a required column."""
+    cols = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    if not cols:
+        return False  # table doesn't exist yet, CREATE will handle it
+    return not any(c[1] == required_col for c in cols)
+
+
 def init_db() -> None:
     conn = get_db()
+
+    # Migrate old date-based market tables to month+year schema
+    for table in ("historic_pricing", "past_negotiations"):
+        if _needs_schema_migration(conn, table, "month"):
+            conn.execute(f"DROP TABLE IF EXISTS {table}")
+            logger.info("Dropped old-schema table %s for migration", table)
+
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS negotiations (
@@ -132,6 +150,11 @@ def init_db() -> None:
     chroma_dir = settings.chroma_persist_dir
     migrate_from_chroma(chroma_dir)
     migrate_call_history_from_chroma(chroma_dir)
+
+    # Seed market data from CSVs and sync to Redis for fast retrieval
+    from app.services.market_data import seed_market_data, sync_market_data_to_redis
+    seed_market_data()
+    sync_market_data_to_redis()
 
 
 def get_redis() -> redis.Redis:

@@ -19,12 +19,23 @@ def _parse_phone_numbers(raw: str) -> list[str]:
     return [item.strip() for item in raw.split(",") if item.strip()]
 
 
+_DEFAULT_HOTELS = [
+    {"hotel_name": "Hilton Hotels", "location": "The Loop"},
+    {"hotel_name": "Marriott Bonvoy", "location": "River North"},
+]
+
+
 def _build_targets(args: argparse.Namespace, phone_numbers: list[str]) -> list[dict]:
     targets: list[dict] = []
+    hotels = args.hotels if args.hotels else _DEFAULT_HOTELS
     for index, phone_number in enumerate(phone_numbers[:2], start=1):
+        hotel_info = hotels[index - 1] if index - 1 < len(hotels) else hotels[0]
+        hotel_name = hotel_info["hotel_name"]
+        location = hotel_info["location"]
+        hotel_id = f"{hotel_name.lower().replace(' ', '-')}-{location.lower().replace(' ', '-')}"
         targets.append(
             {
-                "hotel_id": f"{args.campaign_id}-hotel-{index}",
+                "hotel_id": hotel_id,
                 "phone_number": phone_number,
                 "check_in": args.check_in,
                 "check_out": args.check_out,
@@ -32,7 +43,11 @@ def _build_targets(args: argparse.Namespace, phone_numbers: list[str]) -> list[d
                 "target_rate": args.target_rate,
                 "max_rate": args.max_rate,
                 "priority_score": 1.0,
-                "market_context": {"source": "launch_voice_campaign.py", "slot": index},
+                "market_context": {
+                    "hotel_name": hotel_name,
+                    "location": location,
+                    "market": location,
+                },
             }
         )
     return targets
@@ -47,7 +62,22 @@ def main() -> None:
     parser.add_argument("--room", default="standard king")
     parser.add_argument("--check-in", default="2025-06-01")
     parser.add_argument("--check-out", default="2025-06-03")
+    parser.add_argument(
+        "--hotels", nargs="*", default=None,
+        help="Hotel targets as 'Name:Location' pairs (e.g. 'Hilton Hotels:The Loop' 'Marriott Bonvoy:River North'). "
+             "Defaults to Hilton Hotels (The Loop) and Marriott Bonvoy (River North).",
+    )
     args = parser.parse_args()
+
+    # Parse --hotels into dicts
+    if args.hotels:
+        parsed = []
+        for h in args.hotels:
+            if ":" not in h:
+                raise SystemExit(f"Invalid hotel format '{h}'. Use 'Hotel Name:Location'.")
+            name, loc = h.split(":", 1)
+            parsed.append({"hotel_name": name.strip(), "location": loc.strip()})
+        args.hotels = parsed
 
     settings = get_settings()
     raw_phone_numbers = (
