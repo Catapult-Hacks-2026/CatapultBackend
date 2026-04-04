@@ -3,18 +3,8 @@ from __future__ import annotations
 import json
 from typing import AsyncGenerator
 
-import openai
-
+from app.core.shared_clients import get_openai_client
 from app.core.config import get_settings
-
-_client: openai.AsyncOpenAI | None = None
-
-
-def get_openai_client() -> openai.AsyncOpenAI:
-    global _client
-    if _client is None:
-        _client = openai.AsyncOpenAI(api_key=get_settings().openai_api_key)
-    return _client
 
 
 async def invoke_json(

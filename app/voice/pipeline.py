@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from collections.abc import Callable, Coroutine
 from typing import Any
 
@@ -12,12 +13,16 @@ from app.llm.fact_extractor import extract_facts_from_utterance
 from app.llm.negotiation_brain import decide_move, generate_response_streaming
 from app.voice.assemblyai_stt import AssemblyAIRealtimeSTT
 from app.voice.elevenlabs_tts import ElevenLabsStreamingTTS
+from app.voice.interruption import InterruptionDetector
 from app.voice.twilio_bridge import TwilioBridge
 
 logger = logging.getLogger(__name__)
 
 _MAX_GUARDRAIL_RETRIES = 2
 _FALLBACK_STALL = "Let me check on that for you."
+
+# Sentence boundary pattern — flush to TTS at these boundaries for lower latency
+_SENTENCE_END = re.compile(r'(?<=[.!?])\s+')
 
 
 class VoicePipeline:
@@ -33,6 +38,7 @@ class VoicePipeline:
         self._on_quote_received = on_quote_received
         self._on_session_end = on_session_end
 
+        self._interruption = InterruptionDetector()
         self._stt = AssemblyAIRealtimeSTT(
             on_partial=self._on_partial_transcript,
             on_final=self._on_final_transcript,
@@ -74,19 +80,20 @@ class VoicePipeline:
     async def _monitor_loop(self) -> None:
         settings = get_settings()
         max_duration = settings.max_call_duration_seconds
-        import time
-        start = time.monotonic()
+        start = asyncio.get_event_loop().time()
         while not self._done.is_set():
             await asyncio.sleep(10)
-            if time.monotonic() - start > max_duration:
+            if asyncio.get_event_loop().time() - start > max_duration:
                 logger.warning("Session %s exceeded max duration", self._state.session_id)
                 self._done.set()
 
     async def _on_partial_transcript(self, text: str) -> None:
-        pass  # Could be used for barge-in detection (Phase 5)
+        # Feed partial transcripts to interruption detector while agent is speaking
+        if self._interruption.on_partial(text):
+            logger.info("Barge-in detected, clearing Twilio playback")
+            await self._bridge.clear_playback()
 
     async def _on_final_transcript(self, text: str, confidence: float, words: list) -> None:
-        # Only process one utterance at a time
         async with self._processing_lock:
             await self._process_utterance(text, confidence)
 
@@ -102,11 +109,9 @@ class VoicePipeline:
 
         self._state.transcript.append({"role": "hotel", "content": text})
         self._state.status = SessionStatus.ACTIVE
+        self._interruption.clear()
 
-        # Run fact extraction and move decision in parallel.
-        # decide_move reads quotes_received but a quote from *this* utterance
-        # arriving 300ms later is acceptable — the move decision uses prior quotes.
-        # The new quote is appended before the next turn so it informs future moves.
+        # Fact extraction and move decision run in parallel
         quote, move = await asyncio.gather(
             self._run_fact_extraction(text),
             self._decide_with_guardrails(),
@@ -117,7 +122,6 @@ class VoicePipeline:
             if self._on_quote_received:
                 await self._on_quote_received(quote)
 
-        # Stream response: GPT-4o -> ElevenLabs -> Twilio
         response_text = await self._speak(move)
         move.response_text = response_text
         self._state.moves_made.append(move)
@@ -137,7 +141,6 @@ class VoicePipeline:
             except Exception:
                 logger.exception("decide_move failed on attempt %d", attempt + 1)
 
-        # Deterministic fallback
         from app.hotel.enums import MoveType
         return AgentMove(
             move_type=MoveType.PROBE,
@@ -145,40 +148,56 @@ class VoicePipeline:
             reasoning="guardrail fallback",
         )
 
-    async def _stream_tokens_to_tts(self, move: AgentMove, tokens: list[str]) -> None:
-        """Feed GPT-4o tokens to ElevenLabs as they arrive, then signal end."""
+    async def _gpt_to_sentences(self, move: AgentMove, tokens: list[str]) -> None:
+        """Buffer GPT-4o tokens into sentences, flush each sentence to ElevenLabs immediately.
+
+        Flushing at sentence boundaries rather than token-by-token gives ElevenLabs
+        enough context for natural prosody while still starting audio before the full
+        response is generated.
+        """
         token_stream = await generate_response_streaming(move, self._state)
+        buffer = ""
         async for token in token_stream:
             tokens.append(token)
-            await self._tts.send_text_chunk(token)
-        # Empty string signals ElevenLabs to flush and finalize audio
+            buffer += token
+            # Check for sentence boundary in the buffer
+            parts = _SENTENCE_END.split(buffer, maxsplit=1)
+            if len(parts) > 1:
+                sentence, remainder = parts[0], parts[1]
+                await self._tts.send_text_chunk(sentence + " ", flush=True)
+                buffer = remainder
+        # Flush remaining buffer
+        if buffer.strip():
+            await self._tts.send_text_chunk(buffer, flush=True)
+        # Signal ElevenLabs stream end
         await self._tts.send_text_chunk("", flush=True)
 
-    async def _forward_audio_to_twilio(self) -> None:
-        """Forward ElevenLabs audio chunks to Twilio as they arrive."""
+    async def _tts_to_twilio(self) -> None:
+        """Forward audio chunks from ElevenLabs to Twilio, aborting on interruption."""
         async for audio_chunk in self._tts.receive_audio():
+            if self._interruption.was_interrupted:
+                logger.info("Interruption mid-playback, stopping audio forward")
+                break
             await self._bridge.send_audio(audio_chunk)
 
     async def _speak(self, move: AgentMove) -> str:
         collected_tokens: list[str] = []
+        self._interruption.set_speaking(True)
         try:
-            # Run token streaming and audio forwarding concurrently.
-            # ElevenLabs starts synthesizing as soon as the first tokens arrive —
-            # it does not wait for GPT-4o to finish the full response.
             await asyncio.gather(
-                self._stream_tokens_to_tts(move, collected_tokens),
-                self._forward_audio_to_twilio(),
+                self._gpt_to_sentences(move, collected_tokens),
+                self._tts_to_twilio(),
             )
         except Exception:
-            logger.exception("Speak pipeline failed, using TwiML fallback")
+            logger.exception("Speak pipeline failed, using fallback")
             if not collected_tokens:
                 return _FALLBACK_STALL
-
+        finally:
+            self._interruption.set_speaking(False)
         return "".join(collected_tokens)
 
     async def _on_stt_error(self, exc: Exception) -> None:
         logger.error("STT error: %s", exc)
-        # Reconnect logic handled at a higher level; just log here
 
     def signal_done(self) -> None:
         self._done.set()
