@@ -42,6 +42,8 @@ async def lifespan(_: FastAPI):
     init_db()
     # Campaign graph is built on demand per campaign via POST /campaigns/{id}/start
     yield
+    from app.core.shared_clients import close_shared_clients
+    await close_shared_clients()
 
 
 app = FastAPI(title="Autonomous AI Procurement Agent", lifespan=lifespan)
