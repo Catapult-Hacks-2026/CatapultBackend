@@ -12,7 +12,7 @@ from app.hotel.schemas import AgentMove, HotelQuote, WorkerSessionState
 from app.llm.fact_extractor import extract_facts_from_utterance
 from app.llm.negotiation_brain import decide_move, generate_response_streaming
 from app.voice.assemblyai_stt import AssemblyAIRealtimeSTT
-from app.voice.openai_tts import OpenAIStreamingTTS
+from app.voice.elevenlabs_tts import ElevenLabsStreamingTTS
 from app.voice.interruption import InterruptionDetector
 from app.voice.twilio_bridge import TwilioBridge
 
@@ -44,13 +44,12 @@ class VoicePipeline:
             on_final=self._on_final_transcript,
             on_error=self._on_stt_error,
         )
-        self._tts = OpenAIStreamingTTS()
+        self._tts = ElevenLabsStreamingTTS()
         self._done = asyncio.Event()
         self._processing_lock = asyncio.Lock()
 
     async def start(self) -> None:
         await self._stt.connect()
-        await self._tts.connect()
         inbound = asyncio.create_task(self._inbound_loop())
         monitor = asyncio.create_task(self._monitor_loop())
         await self._done.wait()
@@ -94,8 +93,11 @@ class VoicePipeline:
             await self._bridge.clear_playback()
 
     async def _on_final_transcript(self, text: str, confidence: float, words: list) -> None:
+        logger.info("Final transcript received: %r", text)
         async with self._processing_lock:
+            logger.info("Lock acquired, processing utterance: %r", text)
             await self._process_utterance(text, confidence)
+            logger.info("Utterance processing complete")
 
     async def _run_fact_extraction(self, text: str) -> HotelQuote | None:
         try:
@@ -131,9 +133,11 @@ class VoicePipeline:
             self._done.set()
 
     async def _decide_with_guardrails(self) -> AgentMove:
+        logger.info("decide_with_guardrails: starting")
         for attempt in range(_MAX_GUARDRAIL_RETRIES + 1):
             try:
                 move = await decide_move(self._state)
+                logger.info("decide_move returned: %s", move.move_type)
                 result = validate_agent_move(move, self._state.hotel_target, self._state)
                 if result.allowed:
                     return move
@@ -169,8 +173,8 @@ class VoicePipeline:
         # Flush remaining buffer
         if buffer.strip():
             await self._tts.send_text_chunk(buffer, flush=True)
-        # Signal ElevenLabs stream end
-        await self._tts.send_text_chunk("", flush=True)
+        # Send empty-string finalizer -> ElevenLabs sends remaining audio + isFinal -> None sentinel
+        await self._tts.close_stream()
 
     async def _tts_to_twilio(self) -> None:
         """Forward audio chunks from ElevenLabs to Twilio, aborting on interruption."""
@@ -184,10 +188,14 @@ class VoicePipeline:
         collected_tokens: list[str] = []
         self._interruption.set_speaking(True)
         try:
+            logger.info("_speak: connecting TTS for move %s", move.move_type)
+            await self._tts.connect()
+            logger.info("_speak: starting gather for move %s", move.move_type)
             await asyncio.gather(
                 self._gpt_to_sentences(move, collected_tokens),
                 self._tts_to_twilio(),
             )
+            logger.info("_speak: gather complete")
         except Exception:
             logger.exception("Speak pipeline failed, using fallback")
             if not collected_tokens:
