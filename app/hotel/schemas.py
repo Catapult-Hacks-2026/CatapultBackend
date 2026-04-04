@@ -22,12 +22,11 @@ class HotelTarget(BaseModel):
 class HotelQuote(BaseModel):
     nightly_rate: float
     total_rate: float
-    inclusions: dict[str, bool] = Field(default_factory=dict)  # breakfast, wifi, etc.
+    inclusions: dict[str, bool] = Field(default_factory=dict)  # breakfast, wifi, parking, etc.
     cancellation_policy: str = ""
     rate_type: str = ""
     fees: float = 0.0
     raw_text: str = ""
-    confidence: float = 1.0
 
 
 class AgentMove(BaseModel):

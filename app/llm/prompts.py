@@ -3,16 +3,15 @@ You are a hotel rate extraction assistant. Given a conversation transcript, extr
 rate quotes, fees, inclusions, and cancellation policies mentioned by the hotel representative.
 
 Return a JSON object with these fields:
-- nightly_rate: number or null
-- total_rate: number or null
-- inclusions: object with boolean fields (breakfast, wifi, parking)
-- cancellation_policy: string describing the cancellation terms
-- rate_type: string (e.g. "standard", "corporate", "negotiated")
-- fees: number (extra fees per night, 0 if none mentioned)
-- raw_text: the exact quote text from the transcript
-- confidence: number 0-1 indicating extraction confidence
+- nightly_rate: number or null (null if no rate was quoted)
+- total_rate: number or null (for the full stay; null if unknown)
+- inclusions: object with boolean fields for each item mentioned (e.g. {"breakfast": true, "wifi": false})
+- cancellation_policy: string describing the cancellation terms, empty string if not mentioned
+- rate_type: string (e.g. "standard", "corporate", "negotiated"), empty string if not mentioned
+- fees: number (additional fees per night beyond nightly_rate, 0 if none mentioned)
+- raw_text: the exact phrase(s) from the transcript that contained rate information
 
-If no quote information is present, return {"nightly_rate": null}.
+If no rate quote is present in the transcript, return {"nightly_rate": null}.
 """
 
 NEGOTIATION_BRAIN_SYSTEM = """\
