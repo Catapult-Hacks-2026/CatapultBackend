@@ -12,14 +12,22 @@ from fastapi import WebSocket
 from twilio.rest import Client
 from twilio.twiml.voice_response import Connect, Say, Stream, VoiceResponse
 
-from app.core.cache import cache_delete, cache_get, cache_set, cache_set_if_absent
+from app.core.cache import cache_delete, cache_set, cache_set_if_absent
 from app.core.config import get_settings
 from app.core.database import get_db
 from app.models.enums import NegotiationStatus, WorkerEventType
 from app.models.schemas import WorkerEvent
 from app.services.events import publish_worker_event
 from app.services.llm import decide_move_fast, extract_facts_fast, generate_reply_fast
-from app.services.memory import extract_memory_candidates, load_vendor_priors, store_memory_candidates
+from app.services.memory import (
+    extract_memory_candidates,
+    load_negotiation_working_memory_from_redis,
+    load_vendor_priors,
+    refresh_category_working_memory,
+    refresh_negotiation_working_memory,
+    store_memory_candidates,
+    store_negotiation_working_memory_in_redis,
+)
 from app.services.negotiation import process_vendor_input
 
 settings = get_settings()
@@ -163,6 +171,21 @@ async def _append_transcript(negotiation_id: str, line: str) -> None:
 
 
 async def load_vendor_context(negotiation_id: str) -> dict:
+    cached = await load_negotiation_working_memory_from_redis(negotiation_id)
+    if isinstance(cached, dict):
+        conn = get_db()
+        negotiation = conn.execute(
+            "SELECT * FROM negotiations WHERE id = ?",
+            (negotiation_id,),
+        ).fetchone()
+        conn.close()
+        if negotiation is not None:
+            return {
+                "negotiation": negotiation,
+                "messages": cached.get("messages", []),
+                "latest_quote": cached.get("latest_quote"),
+            }
+
     conn = get_db()
     negotiation = conn.execute(
         "SELECT * FROM negotiations WHERE id = ?",
@@ -187,11 +210,26 @@ async def load_vendor_context(negotiation_id: str) -> dict:
         (negotiation_id,),
     ).fetchone()
     conn.close()
-    return {
+    payload = {
         "negotiation": negotiation,
         "messages": [dict(row) for row in messages],
         "latest_quote": dict(latest_quotes) if latest_quotes is not None else None,
     }
+    await store_negotiation_working_memory_in_redis(
+        negotiation_id,
+        {
+            "negotiation_id": negotiation_id,
+            "vendor_name": negotiation["vendor_name"],
+            "product_category": negotiation["product_category"],
+            "buyer_config": json.loads(negotiation["config"]),
+            "messages": payload["messages"],
+            "latest_quote": payload["latest_quote"],
+            "compiled_at": datetime.now(timezone.utc).isoformat(),
+            "source": "sqlite_negotiation_context",
+        },
+        ttl=settings.working_memory_ttl,
+    )
+    return payload
 
 
 async def setup_worker_session(negotiation_id: str) -> WorkerSession:
@@ -331,6 +369,7 @@ async def persist_extracted_facts(negotiation_id: str, utterance: str, facts: di
         )
         conn.commit()
     conn.close()
+    await refresh_negotiation_working_memory(negotiation_id, ttl=settings.working_memory_ttl)
 
 
 async def write_quote_update(session: WorkerSession, facts: dict) -> None:
@@ -418,6 +457,14 @@ async def write_quote_update(session: WorkerSession, facts: dict) -> None:
         f"quote:{session.vendor_name}:{session.product_category}",
         facts,
         ttl=settings.quote_cache_ttl,
+    )
+    await refresh_negotiation_working_memory(
+        session.negotiation_id,
+        ttl=settings.working_memory_ttl,
+    )
+    await refresh_category_working_memory(
+        session.product_category,
+        ttl=settings.working_memory_ttl,
     )
     if session.campaign_id:
         await publish_worker_event(
@@ -535,6 +582,10 @@ async def post_call_summary(session: WorkerSession) -> dict:
     )
     conn.commit()
     conn.close()
+    await refresh_negotiation_working_memory(
+        session.negotiation_id,
+        ttl=settings.working_memory_ttl,
+    )
     return outcome
 
 

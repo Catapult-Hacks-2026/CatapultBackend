@@ -32,6 +32,7 @@ class Settings(BaseSettings):
     worker_heartbeat_interval: int = 10
     session_lock_ttl: int = 900
     quote_cache_ttl: int = 300
+    working_memory_ttl: int = 1800
     memory_validation_threshold: int = 3
     memory_confidence_threshold: float = 0.7
 

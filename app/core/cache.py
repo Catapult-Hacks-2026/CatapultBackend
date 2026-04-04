@@ -105,3 +105,96 @@ async def set_members(key: str) -> set[str]:
     if client is not None:
         return {str(item) for item in await client.smembers(key)}
     return set(_memory_sets.get(key, set()))
+
+
+def vendor_working_memory_key(vendor_name: str, product_category: str) -> str:
+    return f"wm:vendor:{vendor_name}:{product_category}"
+
+
+def negotiation_working_memory_key(negotiation_id: str) -> str:
+    return f"wm:negotiation:{negotiation_id}"
+
+
+def category_working_memory_key(product_category: str) -> str:
+    return f"wm:category:{product_category}"
+
+
+def campaign_working_memory_key(campaign_id: str) -> str:
+    return f"wm:campaign:{campaign_id}"
+
+
+async def get_working_memory(key: str) -> Any:
+    return await cache_get(key)
+
+
+async def put_working_memory(key: str, value: Any, ttl: Optional[int] = None) -> None:
+    await cache_set(key, value, ttl=ttl)
+
+
+async def delete_working_memory(key: str) -> None:
+    await cache_delete(key)
+
+
+async def get_vendor_working_memory(vendor_name: str, product_category: str) -> Any:
+    return await get_working_memory(vendor_working_memory_key(vendor_name, product_category))
+
+
+async def put_vendor_working_memory(
+    vendor_name: str,
+    product_category: str,
+    value: Any,
+    ttl: Optional[int] = None,
+) -> None:
+    await put_working_memory(
+        vendor_working_memory_key(vendor_name, product_category),
+        value,
+        ttl=ttl,
+    )
+
+
+async def get_negotiation_working_memory(negotiation_id: str) -> Any:
+    return await get_working_memory(negotiation_working_memory_key(negotiation_id))
+
+
+async def put_negotiation_working_memory(
+    negotiation_id: str,
+    value: Any,
+    ttl: Optional[int] = None,
+) -> None:
+    await put_working_memory(
+        negotiation_working_memory_key(negotiation_id),
+        value,
+        ttl=ttl,
+    )
+
+
+async def get_category_working_memory(product_category: str) -> Any:
+    return await get_working_memory(category_working_memory_key(product_category))
+
+
+async def put_category_working_memory(
+    product_category: str,
+    value: Any,
+    ttl: Optional[int] = None,
+) -> None:
+    await put_working_memory(
+        category_working_memory_key(product_category),
+        value,
+        ttl=ttl,
+    )
+
+
+async def get_campaign_working_memory(campaign_id: str) -> Any:
+    return await get_working_memory(campaign_working_memory_key(campaign_id))
+
+
+async def put_campaign_working_memory(
+    campaign_id: str,
+    value: Any,
+    ttl: Optional[int] = None,
+) -> None:
+    await put_working_memory(
+        campaign_working_memory_key(campaign_id),
+        value,
+        ttl=ttl,
+    )
