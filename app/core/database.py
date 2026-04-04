@@ -70,6 +70,33 @@ def init_db() -> None:
             transcript TEXT DEFAULT '',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
+
+        CREATE TABLE IF NOT EXISTS quote_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            negotiation_id TEXT NOT NULL REFERENCES negotiations(id),
+            vendor_name TEXT NOT NULL,
+            product_category TEXT NOT NULL DEFAULT 'general',
+            extracted_facts JSON,
+            offer JSON,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS latest_quotes (
+            negotiation_id TEXT PRIMARY KEY REFERENCES negotiations(id),
+            vendor_name TEXT NOT NULL,
+            product_category TEXT NOT NULL DEFAULT 'general',
+            extracted_facts JSON,
+            offer JSON,
+            utility_score REAL,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS session_locks (
+            lock_key TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            expires_at TIMESTAMP NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
         """
     )
     _ensure_column(conn, "negotiations", "product_category", "TEXT NOT NULL DEFAULT 'general'")

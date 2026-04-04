@@ -3,8 +3,8 @@ from datetime import UTC, datetime
 
 from app.core.config import get_settings
 from app.core.database import get_db
+from app.llm.client import invoke_json
 from app.models.schemas import BuyerConfig
-from app.services.llm import Anthropic, invoke_json
 from app.services.rag import retrieve_competitor_context, retrieve_vendor_context
 
 settings = get_settings()
@@ -82,7 +82,7 @@ def generate_negotiation_brief(negotiation_id: str) -> dict:
     )
     competitor_history = retrieve_competitor_context(row["product_category"], top_k=5)
 
-    if not settings.anthropic_api_key or Anthropic is None:
+    if not settings.anthropic_api_key:
         brief = _fallback_brief(dict(row), config, vendor_history)
     else:
         system_prompt = (

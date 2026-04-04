@@ -85,3 +85,15 @@ def suggest_pivot(
         remaining_gap -= needed_improvement * weight
 
     return suggestions
+
+
+def compute_campaign_job_priority(
+    *,
+    utility_gap: float,
+    rounds_used: int,
+    max_rounds: int,
+    vendor_history_score: float = 0.0,
+) -> float:
+    round_pressure = rounds_used / max(max_rounds, 1)
+    raw_priority = (utility_gap * 0.6) + (round_pressure * 0.25) + (vendor_history_score * 0.15)
+    return round(max(0.0, min(1.0, raw_priority)), 4)

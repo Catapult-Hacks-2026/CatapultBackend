@@ -8,17 +8,15 @@ except ImportError:  # pragma: no cover - depends on optional install state
     Anthropic = None
 
 from app.core.config import get_settings
+from app.llm.client import invoke_json as anthropic_invoke_json
+from app.llm.negotiation_brain import decide_move
+from app.llm.prompts import FACT_EXTRACTION_SYSTEM, STRATEGY_INSTRUCTIONS
 from app.models.enums import Strategy
 from app.models.schemas import AgentAction, VendorOffer
 
 settings = get_settings()
 
-_STRATEGY_INSTRUCTIONS = {
-    Strategy.AGGRESSIVE.value: "Anchor low, push hard on concessions, and keep responses direct.",
-    Strategy.BALANCED.value: "Negotiate firmly but collaboratively and trade concessions deliberately.",
-    Strategy.VOLUME.value: "Emphasize order size and repeat business to press for better pricing.",
-    Strategy.RELATIONSHIP.value: "Prioritize long-term partnership, reliability, and operational flexibility.",
-}
+_STRATEGY_INSTRUCTIONS = STRATEGY_INSTRUCTIONS
 
 
 def _client() -> Anthropic:
@@ -54,30 +52,21 @@ def invoke_json(
     model: str | None = None,
     max_tokens: int = 1024,
 ) -> dict:
-    if not settings.anthropic_api_key:
+    if not settings.anthropic_api_key or Anthropic is None:
         raise RuntimeError("Anthropic API key is not configured")
-    response = _client().messages.create(
-        model=model or settings.negotiation_model,
-        max_tokens=max_tokens,
-        system=system_prompt,
-        messages=[{"role": "user", "content": user_prompt}],
-    )
-    text = _extract_text(response)
     try:
-        return _extract_json(text)
-    except json.JSONDecodeError:
-        if retry_prompt:
-            raise
-        stricter = (
-            f"{user_prompt}\n\nReturn valid JSON only. Do not wrap the response in markdown."
-        )
-        return invoke_json(
+        return anthropic_invoke_json(
             system_prompt,
-            stricter,
-            retry_prompt=True,
+            user_prompt,
             model=model,
             max_tokens=max_tokens,
+            temperature=0.2,
         )
+    except Exception:
+        if retry_prompt:
+            raise
+        stricter = f"{user_prompt}\n\nReturn valid JSON only."
+        return invoke_json(system_prompt, stricter, True, model, max_tokens)
 
 
 def _fallback_agent_response(negotiation_context: dict) -> AgentAction:
@@ -134,49 +123,23 @@ def _fallback_extract_offer(vendor_message: str) -> VendorOffer:
 def generate_agent_response(negotiation_context: dict) -> AgentAction:
     if not settings.anthropic_api_key or Anthropic is None:
         return _fallback_agent_response(negotiation_context)
-    strategy = negotiation_context.get("strategy", Strategy.BALANCED.value)
-    strategy_instruction = _STRATEGY_INSTRUCTIONS.get(
-        str(strategy), _STRATEGY_INSTRUCTIONS[Strategy.BALANCED.value]
-    )
-    system_prompt = (
-        "You are an AI procurement negotiator. Stay inside buyer constraints, respond as a buyer, "
-        "and return JSON matching this schema: "
-        '{"counter_offer": {"unit_price": number, "shipping_cost": number, "payment_terms_days": number, '
-        '"delivery_days": number, "notes": string | null} | null, "message": string, "reasoning": string, '
-        '"should_accept": boolean, "should_escalate": boolean}. '
-        "Use any research_brief and competing_offers as negotiating leverage, but do not invent facts that are "
-        "not present in the input context. "
-        f"Strategy persona: {strategy_instruction}"
-    )
-    user_prompt = json.dumps(
-        {
-            "buyer_constraints": negotiation_context.get("buyer_config"),
-            "current_scoring_breakdown": negotiation_context.get("scoring_breakdown"),
-            "current_offer": negotiation_context.get("current_offer"),
-            "round_number": negotiation_context.get("round_number"),
-            "vendor_name": negotiation_context.get("vendor_name"),
-            "conversation_history": negotiation_context.get("conversation_history"),
-            "rag_memory": negotiation_context.get("rag_context"),
-            "research_brief": negotiation_context.get("research_brief"),
-            "competing_offers": negotiation_context.get("competing_offers"),
-            "competitor_history": negotiation_context.get("competitor_history"),
-            "pivot_suggestions": negotiation_context.get("pivot_suggestions"),
-            "guardrail_feedback": negotiation_context.get("guardrail_feedback"),
-        },
-        indent=2,
-        default=str,
-    )
-    payload = invoke_json(system_prompt, user_prompt)
-    return AgentAction.model_validate(payload)
+    return decide_move(negotiation_context)
 
 
 def extract_offer_from_message(vendor_message: str) -> VendorOffer:
     if not settings.anthropic_api_key or Anthropic is None:
         return _fallback_extract_offer(vendor_message)
-    system_prompt = (
-        "Extract a procurement offer from vendor text and return JSON only with keys "
-        '{"unit_price": number, "shipping_cost": number, "payment_terms_days": integer, '
-        '"delivery_days": integer, "notes": string | null}. Use best-effort inference and defaults when omitted.'
-    )
-    payload = invoke_json(system_prompt, vendor_message)
+    payload = invoke_json(FACT_EXTRACTION_SYSTEM, vendor_message)
     return VendorOffer.model_validate(payload)
+
+
+def extract_facts_fast(vendor_message: str) -> VendorOffer:
+    return _fallback_extract_offer(vendor_message)
+
+
+def decide_move_fast(negotiation_context: dict) -> AgentAction:
+    return _fallback_agent_response(negotiation_context)
+
+
+def generate_reply_fast(negotiation_context: dict) -> str:
+    return decide_move_fast(negotiation_context).message

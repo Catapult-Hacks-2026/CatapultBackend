@@ -18,6 +18,18 @@ class Strategy(str, Enum):
     RELATIONSHIP = "relationship"
 
 
+class NegotiationAction(str, Enum):
+    OPEN = "open"
+    COUNTER = "counter"
+    ACCEPT = "accept"
+    REJECT = "reject"
+    PROBE = "probe"
+    CONCEDE = "concede"
+    ANCHOR = "anchor"
+    SILENCE = "silence"
+    CLOSE = "close"
+
+
 class MessageRole(str, Enum):
     VENDOR = "vendor"
     AGENT = "agent"
