@@ -5,6 +5,7 @@ import logging
 import httpx
 
 from app.core.config import get_settings
+from app.core.events import EventType, WorkerEvent, get_event_bus
 from app.hotel.enums import NegotiationOutcome, SessionStatus
 from app.hotel.schemas import WorkerSessionState
 from app.orchestration.session_lock import get_lock_manager
@@ -12,6 +13,8 @@ from app.orchestration.session_lock import get_lock_manager
 logger = logging.getLogger(__name__)
 
 _MAX_TURNS = 20
+# Threshold: if another session has a confirmed rate within this % of our target, skip the call
+_CROSS_SESSION_SKIP_THRESHOLD = 0.05
 
 
 def _backend_url(path: str) -> str:
@@ -35,7 +38,6 @@ async def load_context_node(state: WorkerSessionState) -> dict:
             logger.warning("load_context: failed to fetch quotes for %s: %s", hotel_id, exc)
             prior_quotes = []
 
-    # Distill only negotiation-relevant fields — not the full API response
     prior_low = min((q.get("nightly_rate", 0) for q in prior_quotes if q.get("nightly_rate")), default=None)
     prior_count = len(prior_quotes)
 
@@ -85,20 +87,34 @@ async def start_voice_node(state: WorkerSessionState) -> dict:
             from_=settings.twilio_phone_number,
             url=twiml_url,
         )
+        # Emit WORKER_STARTED event
+        await get_event_bus().publish(WorkerEvent(
+            event_type=EventType.WORKER_STARTED,
+            session_id=state.session_id,
+            campaign_id=state.campaign_id,
+            hotel_id=state.hotel_target.hotel_id,
+            payload={"call_sid": call.sid},
+        ))
         return {"call_sid": call.sid, "status": SessionStatus.RINGING}
     except Exception as exc:
         logger.error("start_voice_node: Twilio call failed: %s", exc)
+        await get_event_bus().publish(WorkerEvent(
+            event_type=EventType.WORKER_FAILED,
+            session_id=state.session_id,
+            campaign_id=state.campaign_id,
+            hotel_id=state.hotel_target.hotel_id,
+            payload={"reason": str(exc)},
+        ))
         return {"status": SessionStatus.FAILED, "error_log": state.error_log + [str(exc)]}
 
 
 async def listen_node(state: WorkerSessionState) -> dict:
-    # In practice the VoicePipeline drives the listen/respond cycle;
-    # this node is a logical marker. The pipeline runs via handle_media_stream_connected().
+    # VoicePipeline drives the listen/respond cycle via handle_media_stream_connected()
     return {}
 
 
 async def extract_facts_node(state: WorkerSessionState) -> dict:
-    # Called from within VoicePipeline._process_utterance directly.
+    # Called from within VoicePipeline._process_utterance directly
     return {}
 
 
@@ -117,25 +133,67 @@ async def sync_quote_node(state: WorkerSessionState) -> dict:
                 "cancellation_policy": latest.cancellation_policy,
                 "rate_type": latest.rate_type,
                 "fees": latest.fees,
-                "confidence": latest.confidence,
             })
         except Exception as exc:
             logger.warning("sync_quote_node: POST /api/quotes/ failed: %s", exc)
+
+    # Emit QUOTE_RECEIVED so campaign controller and other subscribers are aware
+    await get_event_bus().publish(WorkerEvent(
+        event_type=EventType.QUOTE_RECEIVED,
+        session_id=state.session_id,
+        campaign_id=state.campaign_id,
+        hotel_id=state.hotel_target.hotel_id,
+        payload={
+            "nightly_rate": latest.nightly_rate,
+            "rate_type": latest.rate_type,
+        },
+    ))
     return {}
 
 
 async def check_cross_session_node(state: WorkerSessionState) -> dict:
-    # Phase 4 stub: will read campaign market state
+    """Check if another active session has already secured a good rate for this hotel."""
+    target = state.hotel_target
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(_backend_url(f"/api/market/state"))
+            if resp.status_code != 200:
+                return {}
+            market = resp.json()
+
+        confirmed_quotes = market.get("confirmed_quotes", {})
+        hotel_confirmed = confirmed_quotes.get(target.hotel_id)
+
+        if hotel_confirmed is not None:
+            confirmed_rate = float(hotel_confirmed.get("nightly_rate", 0))
+            # If another session confirmed a rate within 5% of our target, no need to continue
+            if confirmed_rate > 0 and confirmed_rate <= target.target_rate * (1 + _CROSS_SESSION_SKIP_THRESHOLD):
+                logger.info(
+                    "cross_session: hotel %s already has confirmed rate $%.2f, terminating session %s",
+                    target.hotel_id, confirmed_rate, state.session_id,
+                )
+                await get_event_bus().publish(WorkerEvent(
+                    event_type=EventType.DUPLICATE_DETECTED,
+                    session_id=state.session_id,
+                    campaign_id=state.campaign_id,
+                    hotel_id=target.hotel_id,
+                    payload={"confirmed_rate": confirmed_rate, "reason": "cross_session_duplicate"},
+                ))
+                return {"next_move": state.next_move}  # termination handled by pipeline
+
+    except Exception as exc:
+        logger.warning("check_cross_session_node failed: %s", exc)
+
     return {}
 
 
 async def decide_move_node(state: WorkerSessionState) -> dict:
-    # Decision happens inside VoicePipeline; node is a logical marker
+    # Decision happens inside VoicePipeline._process_utterance
     return {}
 
 
 async def speak_node(state: WorkerSessionState) -> dict:
-    # Execution happens inside VoicePipeline; node is a logical marker
+    # Execution happens inside VoicePipeline._process_utterance
     return {}
 
 
@@ -173,7 +231,6 @@ async def post_call_node(state: WorkerSessionState) -> dict:
                 "follow_up_reason": analysis.follow_up_reason,
             })
 
-        # Store call summary in ChromaDB for future behavioral context
         store = get_behavioral_store()
         await store.store_call_summary(
             session_id=state.session_id,
@@ -183,9 +240,34 @@ async def post_call_node(state: WorkerSessionState) -> dict:
             quotes=state.quotes_received,
         )
 
+        best_rate = min((q.nightly_rate for q in state.quotes_received), default=None)
+
+        # Emit outcome event
+        event_type = (
+            EventType.DEAL_CLOSED
+            if analysis.outcome == NegotiationOutcome.RATE_CONFIRMED
+            else EventType.CALLBACK_REQUESTED
+            if analysis.outcome == NegotiationOutcome.CALLBACK_REQUESTED
+            else EventType.WORKER_COMPLETED
+        )
+        await get_event_bus().publish(WorkerEvent(
+            event_type=event_type,
+            session_id=state.session_id,
+            campaign_id=state.campaign_id,
+            hotel_id=state.hotel_target.hotel_id,
+            payload={"outcome": analysis.outcome, "best_rate": best_rate},
+        ))
+
         return {"status": SessionStatus.COMPLETED, "outcome": analysis.outcome}
     except Exception as exc:
         logger.exception("post_call_node failed: %s", exc)
+        await get_event_bus().publish(WorkerEvent(
+            event_type=EventType.WORKER_FAILED,
+            session_id=state.session_id,
+            campaign_id=state.campaign_id,
+            hotel_id=state.hotel_target.hotel_id,
+            payload={"reason": str(exc)},
+        ))
         return {"status": SessionStatus.COMPLETED, "outcome": NegotiationOutcome.FAILED}
 
 

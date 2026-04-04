@@ -140,22 +140,48 @@ async def score_and_prioritize_node(state: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 async def check_eligibility_node(state: dict) -> dict:
+    from app.core.events import EventType, WorkerEvent, get_event_bus
+
     queued: list[tuple[float, HotelTarget]] = state.get("queued_jobs", [])
     active_workers: dict[str, str] = state.get("active_workers", {})
+    market_state: dict = state.get("market_state", {})
     lock_manager = get_lock_manager()
     settings = get_settings()
 
+    confirmed_quotes: dict = market_state.get("confirmed_quotes", {})
     concurrency_remaining = settings.worker_concurrency_limit - len(active_workers)
     eligible: list[tuple[float, HotelTarget]] = []
     deferred: list[tuple[float, HotelTarget]] = []
 
     for score, target in queued:
+        # Duplicate check 1: another session holds the lock for this hotel
         if lock_manager.is_locked(target.hotel_id):
             deferred.append((score, target))
             continue
+
+        # Duplicate check 2: a confirmed quote already exists within acceptable range
+        confirmed = confirmed_quotes.get(target.hotel_id)
+        if confirmed is not None:
+            confirmed_rate = float(confirmed.get("nightly_rate", 0))
+            if confirmed_rate > 0 and confirmed_rate <= target.max_rate:
+                logger.info(
+                    "check_eligibility: skipping hotel %s — confirmed rate $%.2f already on record",
+                    target.hotel_id, confirmed_rate,
+                )
+                await get_event_bus().publish(WorkerEvent(
+                    event_type=EventType.DUPLICATE_DETECTED,
+                    session_id="",
+                    campaign_id=state.get("campaign_id", ""),
+                    hotel_id=target.hotel_id,
+                    payload={"confirmed_rate": confirmed_rate, "reason": "pre_spawn_duplicate"},
+                ))
+                continue  # skip entirely — don't defer, just drop
+
+        # Concurrency cap
         if concurrency_remaining <= 0:
             deferred.append((score, target))
             continue
+
         eligible.append((score, target))
         concurrency_remaining -= 1
 
