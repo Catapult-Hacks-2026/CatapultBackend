@@ -2,9 +2,8 @@ from __future__ import annotations
 
 import logging
 
-import httpx
-
 from app.core.config import get_settings
+from app.core.shared_clients import get_http_client
 from app.core.events import EventType, WorkerEvent, get_event_bus
 from app.hotel.enums import NegotiationOutcome, SessionStatus
 from app.hotel.schemas import WorkerSessionState
@@ -23,20 +22,19 @@ def _backend_url(path: str) -> str:
 
 async def load_context_node(state: WorkerSessionState) -> dict:
     hotel_id = state.hotel_target.hotel_id
-    async with httpx.AsyncClient() as client:
-        try:
-            hotel_resp = await client.get(_backend_url(f"/api/hotels/{hotel_id}"))
-            hotel_data = hotel_resp.json() if hotel_resp.status_code == 200 else {}
-        except Exception as exc:
-            logger.warning("load_context: failed to fetch hotel %s: %s", hotel_id, exc)
-            hotel_data = {}
+    client = get_http_client()
+    try:
+        hotel_resp = await client.get(_backend_url(f"/api/hotels/{hotel_id}"))
+        hotel_data = hotel_resp.json() if hotel_resp.status_code == 200 else {}
+    except Exception as exc:
+        logger.warning("load_context: failed to fetch hotel %s: %s", hotel_id, exc)
+        hotel_data = {}
 
-        try:
-            quotes_resp = await client.get(_backend_url(f"/api/hotels/{hotel_id}/quotes"))
-            prior_quotes = quotes_resp.json() if quotes_resp.status_code == 200 else []
-        except Exception as exc:
-            logger.warning("load_context: failed to fetch quotes for %s: %s", hotel_id, exc)
-            prior_quotes = []
+    try:
+        quotes_resp = await client.get(_backend_url(f"/api/hotels/{hotel_id}/quotes"))
+        prior_quotes = quotes_resp.json() if quotes_resp.status_code == 200 else []
+    except Exception as exc:
+        logger.warning("load_context: failed to fetch quotes for %s: %s", hotel_id, exc)
 
     prior_low = min((q.get("nightly_rate", 0) for q in prior_quotes if q.get("nightly_rate")), default=None)
     prior_count = len(prior_quotes)
@@ -177,20 +175,20 @@ async def sync_quote_node(state: WorkerSessionState) -> dict:
     if not state.quotes_received:
         return {}
     latest = state.quotes_received[-1]
-    async with httpx.AsyncClient() as client:
-        try:
-            await client.post(_backend_url("/api/quotes/"), json={
-                "session_id": state.session_id,
-                "hotel_id": state.hotel_target.hotel_id,
-                "nightly_rate": latest.nightly_rate,
-                "total_rate": latest.total_rate,
-                "inclusions": latest.inclusions,
-                "cancellation_policy": latest.cancellation_policy,
-                "rate_type": latest.rate_type,
-                "fees": latest.fees,
-            })
-        except Exception as exc:
-            logger.warning("sync_quote_node: POST /api/quotes/ failed: %s", exc)
+    client = get_http_client()
+    try:
+        await client.post(_backend_url("/api/quotes/"), json={
+            "session_id": state.session_id,
+            "hotel_id": state.hotel_target.hotel_id,
+            "nightly_rate": latest.nightly_rate,
+            "total_rate": latest.total_rate,
+            "inclusions": latest.inclusions,
+            "cancellation_policy": latest.cancellation_policy,
+            "rate_type": latest.rate_type,
+            "fees": latest.fees,
+        })
+    except Exception as exc:
+        logger.warning("sync_quote_node: POST /api/quotes/ failed: %s", exc)
 
     # Emit QUOTE_RECEIVED so campaign controller and other subscribers are aware
     await get_event_bus().publish(WorkerEvent(
@@ -210,11 +208,11 @@ async def check_cross_session_node(state: WorkerSessionState) -> dict:
     """Check if another active session has already secured a good rate for this hotel."""
     target = state.hotel_target
     try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(_backend_url(f"/api/market/state"))
-            if resp.status_code != 200:
-                return {}
-            market = resp.json()
+        client = get_http_client()
+        resp = await client.get(_backend_url("/api/market/state"))
+        if resp.status_code != 200:
+            return {}
+        market = resp.json()
 
         confirmed_quotes = market.get("confirmed_quotes", {})
         hotel_confirmed = confirmed_quotes.get(target.hotel_id)
@@ -279,14 +277,14 @@ async def post_call_node(state: WorkerSessionState) -> dict:
     # conflict with a replacement worker that now owns this hotel.
     if "lock expired" in state.error_log:
         logger.info("post_call_node: lock lost for session %s, marking failed", state.session_id)
-        async with httpx.AsyncClient() as client:
-            try:
-                await client.patch(_backend_url(f"/api/sessions/{state.session_id}"), json={
-                    "status": SessionStatus.FAILED,
-                    "outcome": NegotiationOutcome.FAILED,
-                })
-            except Exception as exc:
-                logger.warning("post_call_node: failed to patch session status: %s", exc)
+        client = get_http_client()
+        try:
+            await client.patch(_backend_url(f"/api/sessions/{state.session_id}"), json={
+                "status": SessionStatus.FAILED,
+                "outcome": NegotiationOutcome.FAILED,
+            })
+        except Exception as exc:
+            logger.warning("post_call_node: failed to patch session status: %s", exc)
         await get_event_bus().publish(WorkerEvent(
             event_type=EventType.WORKER_FAILED,
             session_id=state.session_id,
@@ -302,18 +300,18 @@ async def post_call_node(state: WorkerSessionState) -> dict:
     try:
         analysis = await analyze_call(state)
 
-        async with httpx.AsyncClient() as client:
-            await client.patch(_backend_url(f"/api/sessions/{state.session_id}"), json={
-                "status": SessionStatus.COMPLETED,
-                "outcome": analysis.outcome,
-                "transcript": state.transcript,
-                "summary": analysis.summary,
-                "key_patterns": analysis.key_patterns,
-                "lessons": analysis.lessons,
-                "call_quality_score": analysis.call_quality_score,
-                "follow_up_recommended": analysis.follow_up_recommended,
-                "follow_up_reason": analysis.follow_up_reason,
-            })
+        client = get_http_client()
+        await client.patch(_backend_url(f"/api/sessions/{state.session_id}"), json={
+            "status": SessionStatus.COMPLETED,
+            "outcome": analysis.outcome,
+            "transcript": state.transcript,
+            "summary": analysis.summary,
+            "key_patterns": analysis.key_patterns,
+            "lessons": analysis.lessons,
+            "call_quality_score": analysis.call_quality_score,
+            "follow_up_recommended": analysis.follow_up_recommended,
+            "follow_up_reason": analysis.follow_up_reason,
+        })
 
         store = get_behavioral_store()
         await store.store_call_summary(

@@ -5,9 +5,8 @@ import logging
 import uuid
 from typing import Any
 
-import httpx
-
 from app.core.config import get_settings
+from app.core.shared_clients import get_http_client
 from app.hotel.enums import NegotiationOutcome, SessionStatus  # noqa: F401 (SessionStatus used in spawned worker state)
 from app.hotel.schemas import HotelTarget, WorkerResult, WorkerSessionState
 from app.memory.behavioral_store import get_behavioral_store
@@ -34,13 +33,13 @@ def _merge_state(state: dict, updates: dict) -> dict:
 async def ingest_targets_node(state: dict) -> dict:
     campaign_id = state["campaign_id"]
     logger.info("ingest_targets: loading targets for campaign %s", campaign_id)
-    async with httpx.AsyncClient() as client:
-        try:
-            resp = await client.get(_backend_url(f"/api/campaigns/{campaign_id}/targets"))
-            raw = resp.json() if resp.status_code == 200 else []
-        except Exception as exc:
-            logger.error("ingest_targets: fetch failed: %s", exc)
-            raw = []
+    client = get_http_client()
+    try:
+        resp = await client.get(_backend_url(f"/api/campaigns/{campaign_id}/targets"))
+        raw = resp.json() if resp.status_code == 200 else []
+    except Exception as exc:
+        logger.error("ingest_targets: fetch failed: %s", exc)
+        raw = []
 
     target_jobs: dict[str, HotelTarget] = {}
     for item in raw:
@@ -101,15 +100,21 @@ async def deduplicate_node(state: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 async def load_market_state_node(state: dict) -> dict:
-    async with httpx.AsyncClient() as client:
-        market: dict[str, Any] = {}
-        signals: dict[str, Any] = {}
+    client = get_http_client()
+    market: dict[str, Any] = {}
+    signals: dict[str, Any] = {}
+
+    async def _fetch_market():
+        nonlocal market
         try:
             r = await client.get(_backend_url("/api/market/state"))
             if r.status_code == 200:
                 market = r.json()
         except Exception as exc:
             logger.warning("load_market_state: /api/market/state failed: %s", exc)
+
+    async def _fetch_signals():
+        nonlocal signals
         try:
             r = await client.get(_backend_url("/api/market/signals"))
             if r.status_code == 200:
@@ -117,6 +122,7 @@ async def load_market_state_node(state: dict) -> dict:
         except Exception as exc:
             logger.warning("load_market_state: /api/market/signals failed: %s", exc)
 
+    await asyncio.gather(_fetch_market(), _fetch_signals())
     return _merge_state(state, {"market_state": {**market, "signals": signals}})
 
 
@@ -191,7 +197,7 @@ async def check_eligibility_node(state: dict) -> dict:
         eligible.append((score, target))
         concurrency_remaining -= 1
 
-    logger.info(
+    logger.debug(
         "check_eligibility: campaign %s eligible=%d deferred=%d active=%d",
         state.get("campaign_id", ""),
         len(eligible),
@@ -258,8 +264,12 @@ async def monitor_workers_node(state: dict) -> dict:
     failed_jobs: list[WorkerResult] = list(state.get("failed_jobs", []))
     retry_queue: list[tuple[HotelTarget, int]] = list(state.get("retry_queue", []))
 
+    # Avoid tight-looping while workers are still running
+    if active_workers:
+        await asyncio.sleep(5)
+
     still_active: dict[str, str] = {}
-    logger.info(
+    logger.debug(
         "monitor_workers: campaign %s inspecting %d active worker(s)",
         state.get("campaign_id", ""),
         len(active_workers),
@@ -285,7 +295,8 @@ async def monitor_workers_node(state: dict) -> dict:
                 moves_made=[],
             ))
         else:
-            result: WorkerSessionState = task.result()
+            raw_result = task.result()
+            result = raw_result if isinstance(raw_result, WorkerSessionState) else WorkerSessionState.model_validate(raw_result)
             logger.info(
                 "monitor_workers: worker finished session_id=%s status=%s outcome=%s call_sid=%s turns=%d quotes=%d",
                 result.session_id,
@@ -347,7 +358,7 @@ async def handle_outcomes_node(state: dict) -> dict:
 
     # Merge deferred back into queue for next cycle
     next_queue = deferred + promotable
-    logger.info(
+    logger.debug(
         "handle_outcomes: campaign %s next_queue=%d failed=%d retryable=%d deferred=%d",
         state.get("campaign_id", ""),
         len(next_queue),
@@ -392,11 +403,11 @@ async def emit_summary_node(state: dict) -> dict:
         ],
     }
 
-    async with httpx.AsyncClient() as client:
-        try:
-            await client.post(_backend_url(f"/api/campaigns/{campaign_id}/summary"), json=summary)
-        except Exception as exc:
-            logger.error("emit_summary: POST failed: %s", exc)
+    client = get_http_client()
+    try:
+        await client.post(_backend_url(f"/api/campaigns/{campaign_id}/summary"), json=summary)
+    except Exception as exc:
+        logger.error("emit_summary: POST failed: %s", exc)
 
     logger.info("emit_summary: campaign %s summary=%s", campaign_id, summary)
 

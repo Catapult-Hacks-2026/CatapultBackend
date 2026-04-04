@@ -1,8 +1,11 @@
 import asyncio
+import csv
 import json
 from datetime import UTC, datetime
+from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, WebSocket, WebSocketDisconnect
+from pydantic import BaseModel
 
 from app.core.database import get_db
 from app.models.enums import MessageRole, NegotiationStatus, Strategy
@@ -22,6 +25,147 @@ from app.services.scoring import score_offer, suggest_pivot
 from app.services.voice import initiate_call
 
 router = APIRouter()
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_DEFAULT_MARKET_CSVS = [
+    "San Francisco Hospitality Market Data - Chicago Historic Pricing.csv",
+    "San Francisco Hospitality Market Data - Chicago Past Negotiations.csv",
+]
+
+
+class ImportMarketDataRequest(BaseModel):
+    filenames: list[str] = _DEFAULT_MARKET_CSVS.copy()
+    truncate_existing: bool = False
+
+
+def _parse_money(value: str) -> float:
+    return float(value.replace("$", "").replace(",", "").strip())
+
+
+def _parse_year(value: str) -> int:
+    return int(value.replace("$", "").replace(",", "").strip())
+
+
+def _parse_month(value: str) -> int:
+    return datetime.strptime(value.strip(), "%B").month
+
+
+def _table_columns(conn, table_name: str) -> set[str]:
+    return {row["name"] for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}
+
+
+def _import_historic_pricing(conn, csv_path: Path) -> int:
+    inserted = 0
+    columns = _table_columns(conn, "historic_pricing")
+    use_legacy_date = "date" in columns and "month" not in columns and "year" not in columns
+    with csv_path.open(newline="", encoding="utf-8-sig") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            if use_legacy_date:
+                conn.execute(
+                    """
+                    INSERT INTO historic_pricing (hotel, location, date, price_per_night)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (
+                        row["Hotel Chain"].strip(),
+                        row["Location"].strip(),
+                        f"{row['Month'].strip()} {_parse_year(row['Year'])}",
+                        _parse_money(row["$/night"]),
+                    ),
+                )
+            else:
+                conn.execute(
+                    """
+                    INSERT INTO historic_pricing (hotel, location, month, year, price_per_night)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        row["Hotel Chain"].strip(),
+                        row["Location"].strip(),
+                        _parse_month(row["Month"]),
+                        _parse_year(row["Year"]),
+                        _parse_money(row["$/night"]),
+                    ),
+                )
+            inserted += 1
+    return inserted
+
+
+def _import_past_negotiations(conn, csv_path: Path) -> int:
+    inserted = 0
+    columns = _table_columns(conn, "past_negotiations")
+    use_legacy_date = "date" in columns and "month" not in columns and "year" not in columns
+    with csv_path.open(newline="", encoding="utf-8-sig") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            date_value = datetime.strptime(row["Date"].strip(), "%Y-%m-%d")
+            if use_legacy_date:
+                conn.execute(
+                    """
+                    INSERT INTO past_negotiations (
+                        hotel, location, date, starting_price, negotiation_price, proposed_price
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        row["Hotel Chain"].strip(),
+                        row["Location"].strip(),
+                        row["Date"].strip(),
+                        _parse_money(row["Starting Rate ($/night)"]),
+                        _parse_money(row["Negotiated Rate ($/night)"]),
+                        _parse_money(row["Initial Proposed Rate ($/night)"]),
+                    ),
+                )
+            else:
+                conn.execute(
+                    """
+                    INSERT INTO past_negotiations (
+                        hotel, location, month, year, starting_price, negotiation_price, proposed_price
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        row["Hotel Chain"].strip(),
+                        row["Location"].strip(),
+                        date_value.month,
+                        date_value.year,
+                        _parse_money(row["Starting Rate ($/night)"]),
+                        _parse_money(row["Negotiated Rate ($/night)"]),
+                        _parse_money(row["Initial Proposed Rate ($/night)"]),
+                    ),
+                )
+            inserted += 1
+    return inserted
+
+
+def _import_market_csvs(payload: ImportMarketDataRequest) -> dict:
+    known_importers = {
+        "San Francisco Hospitality Market Data - Chicago Historic Pricing.csv": ("historic_pricing", _import_historic_pricing),
+        "San Francisco Hospitality Market Data - Chicago Past Negotiations.csv": ("past_negotiations", _import_past_negotiations),
+    }
+    conn = get_db()
+    counts: dict[str, int] = {}
+    try:
+        if payload.truncate_existing:
+            touched_tables = {known_importers[name][0] for name in payload.filenames if name in known_importers}
+            for table_name in touched_tables:
+                conn.execute(f"DELETE FROM {table_name}")
+
+        for filename in payload.filenames:
+            importer_info = known_importers.get(filename)
+            if importer_info is None:
+                raise HTTPException(status_code=400, detail=f"Unsupported CSV file: {filename}")
+            csv_path = _PROJECT_ROOT / filename
+            if not csv_path.exists():
+                raise HTTPException(status_code=404, detail=f"CSV file not found: {filename}")
+            table_name, importer = importer_info
+            counts[table_name] = counts.get(table_name, 0) + importer(conn, csv_path)
+
+        conn.commit()
+        return {"imported": counts, "filenames": payload.filenames, "truncate_existing": payload.truncate_existing}
+    finally:
+        conn.close()
 
 
 def _parse_offer(payload: str | None) -> VendorOffer | None:
@@ -96,6 +240,11 @@ async def create_batch_negotiations(
             )
         )
     return BatchNegotiationResponse(items=results)
+
+
+@router.post("/import-market-data")
+def import_market_data(payload: ImportMarketDataRequest) -> dict:
+    return _import_market_csvs(payload)
 
 
 @router.get("/", response_model=list[NegotiationResponse])
