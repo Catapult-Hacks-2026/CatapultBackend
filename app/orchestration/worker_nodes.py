@@ -103,6 +103,13 @@ async def start_voice_node(state: WorkerSessionState) -> dict:
         if worker:
             await worker.wait_for_call_end()
 
+        # Hang up the Twilio call now that the pipeline is done
+        try:
+            call.update(status="completed")
+            logger.info("start_voice_node: call %s hung up", call.sid)
+        except Exception as exc:
+            logger.warning("start_voice_node: failed to hang up call %s: %s", call.sid, exc)
+
         return {"call_sid": call.sid, "status": SessionStatus.COMPLETED}
     except Exception as exc:
         logger.error("start_voice_node: Twilio call failed: %s", exc)
