@@ -1,24 +1,23 @@
 from __future__ import annotations
 
 import asyncio
-import base64
-import json
 import logging
 from collections.abc import Callable, Coroutine
 from typing import Any
 
-import websockets
-from websockets.exceptions import ConnectionClosed
+from assemblyai.streaming.v3 import (
+    Encoding,
+    SpeechModel,
+    StreamingClient,
+    StreamingClientOptions,
+    StreamingEvents,
+    StreamingParameters,
+    TurnEvent,
+)
 
 from app.core.config import get_settings
 
 logger = logging.getLogger(__name__)
-
-_WORD_BOOST = [
-    "rate", "nightly", "per night", "check-in", "check-out",
-    "cancellation", "refundable", "corporate", "negotiated",
-    "breakfast included", "complimentary", "availability",
-]
 
 
 class AssemblyAIRealtimeSTT:
@@ -28,82 +27,89 @@ class AssemblyAIRealtimeSTT:
         on_final: Callable[[str, float, list], Coroutine[Any, Any, None]] | None = None,
         on_error: Callable[[Exception], Coroutine[Any, Any, None]] | None = None,
     ) -> None:
-        self.on_partial = on_partial
-        self.on_final = on_final
-        self.on_error = on_error
-        self._ws: websockets.WebSocketClientProtocol | None = None
-        self._receive_task: asyncio.Task | None = None
+        self._on_partial = on_partial
+        self._on_final = on_final
+        self._on_error = on_error
+        self._client: StreamingClient | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._audio_queue: asyncio.Queue[bytes] = asyncio.Queue()
+        self._stream_task: asyncio.Task | None = None
+        self._audio_buffer = bytearray()
+        # AssemblyAI v3 requires >= 50ms per send; Twilio sends 20ms chunks (160 bytes at 8kHz mulaw)
+        # Buffer 4 chunks = 80ms to stay safely above the minimum
+        self._buffer_min_bytes = 160 * 4
 
     async def connect(self) -> None:
         settings = get_settings()
-        silence_ms = settings.assemblyai_end_utterance_silence_ms
-        url = (
-            f"wss://api.assemblyai.com/v2/realtime/ws"
-            f"?sample_rate=8000"
-            f"&token={settings.assemblyai_api_key}"
-            f"&encoding=pcm_mulaw"
-            f"&end_utterance_silence_threshold={silence_ms}"
+        self._loop = asyncio.get_event_loop()
+
+        opts = StreamingClientOptions(api_key=settings.assemblyai_api_key)
+        self._client = StreamingClient(opts)
+
+        def on_turn(client: StreamingClient, event: TurnEvent) -> None:
+            if not event.transcript:
+                return
+            if event.end_of_turn:
+                if self._on_final and self._loop:
+                    words = [{"text": w.text, "confidence": w.confidence} for w in event.words]
+                    asyncio.run_coroutine_threadsafe(
+                        self._on_final(event.transcript, 1.0, words),
+                        self._loop,
+                    )
+            else:
+                if self._on_partial and self._loop:
+                    asyncio.run_coroutine_threadsafe(
+                        self._on_partial(event.transcript),
+                        self._loop,
+                    )
+
+        def on_error(client: StreamingClient, error: Exception) -> None:
+            logger.error("AssemblyAI error: %s", error)
+            if self._on_error and self._loop:
+                asyncio.run_coroutine_threadsafe(
+                    self._on_error(error),
+                    self._loop,
+                )
+
+        self._client.on(StreamingEvents.Turn, on_turn)
+        self._client.on(StreamingEvents.Error, on_error)
+
+        params = StreamingParameters(
+            sample_rate=8000,
+            encoding=Encoding.pcm_mulaw,
+            speech_model=SpeechModel.universal_streaming_english,
+            end_utterance_silence_threshold=settings.assemblyai_end_utterance_silence_ms,
         )
-        self._ws = await websockets.connect(url)
-
-        # Send word boost config
-        await self._ws.send(json.dumps({
-            "word_boost": _WORD_BOOST,
-            "boost_param": "high",
-        }))
-
-        self._receive_task = asyncio.create_task(self._receive_loop())
+        self._client.connect(params)
+        self._stream_task = asyncio.create_task(self._stream_loop())
         logger.info("AssemblyAI STT connected")
 
+    async def _stream_loop(self) -> None:
+        """Buffer Twilio 20ms chunks and forward once >= 80ms accumulated."""
+        while self._client is not None:
+            try:
+                audio = await asyncio.wait_for(self._audio_queue.get(), timeout=1.0)
+                self._audio_buffer.extend(audio)
+                if len(self._audio_buffer) >= self._buffer_min_bytes:
+                    self._client.stream(bytes(self._audio_buffer))
+                    self._audio_buffer.clear()
+            except asyncio.TimeoutError:
+                # Flush any remaining buffered audio so we don't starve AssemblyAI
+                if self._audio_buffer and self._client:
+                    self._client.stream(bytes(self._audio_buffer))
+                    self._audio_buffer.clear()
+                continue
+            except Exception:
+                logger.exception("AssemblyAI stream loop error")
+                break
+
     async def send_audio(self, audio_bytes: bytes) -> None:
-        if self._ws is None:
-            return
-        encoded = base64.b64encode(audio_bytes).decode("utf-8")
-        await self._ws.send(json.dumps({"audio_data": encoded}))
-
-    async def _receive_loop(self) -> None:
-        if self._ws is None:
-            return
-        try:
-            async for raw in self._ws:
-                event = json.loads(raw)
-                msg_type = event.get("message_type")
-
-                if msg_type == "PartialTranscript":
-                    text = event.get("text", "")
-                    if text and self.on_partial:
-                        await self.on_partial(text)
-
-                elif msg_type == "FinalTranscript":
-                    text = event.get("text", "")
-                    confidence = event.get("confidence", 1.0)
-                    words = event.get("words", [])
-                    if text and self.on_final:
-                        await self.on_final(text, confidence, words)
-
-                elif msg_type == "SessionBegins":
-                    logger.debug("AssemblyAI session began: %s", event.get("session_id"))
-
-                elif msg_type == "Error":
-                    err = RuntimeError(f"AssemblyAI error: {event.get('error')}")
-                    if self.on_error:
-                        await self.on_error(err)
-
-        except ConnectionClosed:
-            logger.info("AssemblyAI WebSocket closed")
-        except Exception as exc:
-            logger.exception("AssemblyAI receive loop error")
-            if self.on_error:
-                await self.on_error(exc)
+        await self._audio_queue.put(audio_bytes)
 
     async def close(self) -> None:
-        if self._ws is not None:
-            try:
-                await self._ws.send(json.dumps({"terminate_session": True}))
-                await self._ws.close()
-            except Exception:
-                pass
-        if self._receive_task is not None:
-            self._receive_task.cancel()
-        self._ws = None
+        if self._stream_task:
+            self._stream_task.cancel()
+        if self._client:
+            self._client.disconnect(terminate=True)
+        self._client = None
         logger.info("AssemblyAI STT closed")

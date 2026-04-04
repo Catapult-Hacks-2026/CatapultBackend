@@ -12,7 +12,7 @@ from app.hotel.schemas import AgentMove, HotelQuote, WorkerSessionState
 from app.llm.fact_extractor import extract_facts_from_utterance
 from app.llm.negotiation_brain import decide_move, generate_response_streaming
 from app.voice.assemblyai_stt import AssemblyAIRealtimeSTT
-from app.voice.elevenlabs_tts import ElevenLabsStreamingTTS
+from app.voice.openai_tts import OpenAIStreamingTTS
 from app.voice.interruption import InterruptionDetector
 from app.voice.twilio_bridge import TwilioBridge
 
@@ -44,7 +44,7 @@ class VoicePipeline:
             on_final=self._on_final_transcript,
             on_error=self._on_stt_error,
         )
-        self._tts = ElevenLabsStreamingTTS()
+        self._tts = OpenAIStreamingTTS()
         self._done = asyncio.Event()
         self._processing_lock = asyncio.Lock()
 

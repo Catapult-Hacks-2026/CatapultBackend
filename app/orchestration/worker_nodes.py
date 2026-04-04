@@ -77,6 +77,8 @@ def route_lock(state: WorkerSessionState) -> str:
 
 
 async def start_voice_node(state: WorkerSessionState) -> dict:
+    from app.orchestration.worker_graph import get_active_worker
+
     settings = get_settings()
     try:
         from twilio.rest import Client as TwilioClient
@@ -87,7 +89,6 @@ async def start_voice_node(state: WorkerSessionState) -> dict:
             from_=settings.twilio_phone_number,
             url=twiml_url,
         )
-        # Emit WORKER_STARTED event
         await get_event_bus().publish(WorkerEvent(
             event_type=EventType.WORKER_STARTED,
             session_id=state.session_id,
@@ -95,7 +96,14 @@ async def start_voice_node(state: WorkerSessionState) -> dict:
             hotel_id=state.hotel_target.hotel_id,
             payload={"call_sid": call.sid},
         ))
-        return {"call_sid": call.sid, "status": SessionStatus.RINGING}
+        logger.info("start_voice_node: call %s placed, waiting for pipeline to finish", call.sid)
+
+        # Block until VoicePipeline signals done via handle_media_stream_connected
+        worker = get_active_worker(state.session_id)
+        if worker:
+            await worker.wait_for_call_end()
+
+        return {"call_sid": call.sid, "status": SessionStatus.COMPLETED}
     except Exception as exc:
         logger.error("start_voice_node: Twilio call failed: %s", exc)
         await get_event_bus().publish(WorkerEvent(
