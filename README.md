@@ -1,46 +1,87 @@
-# Autonomous AI Procurement Agent
+# Catapult26 — Hotel Rate Negotiation Agent
 
-An automated negotiation platform that handles B2B procurement via real-time phone calls (Twilio) and text-based communication. Uses deterministic scoring, RAG-powered historical context, and LLM orchestration with strict guardrails.
+An AI-powered system that autonomously calls hotels, negotiates room rates via live phone conversation, and manages multi-hotel campaigns at scale.
 
 ## Architecture
 
 ```
-Vendor (Phone/Webhook)
-        │
-        ▼
-┌─────────────────┐
-│  Twilio Voice    │──── STT (Deepgram) ────┐
-│  / Webhook API   │                         │
-└─────────────────┘                         │
-                                            ▼
-                                 ┌─────────────────────┐
-                                 │   FastAPI Backend     │
-                                 │                       │
-                                 │  ├─ Negotiation FSM   │
-                                 │  ├─ Scoring Engine     │
-                                 │  ├─ RAG (ChromaDB)     │
-                                 │  ├─ LLM Orchestrator   │
-                                 │  ├─ Rule Engine        │
-                                 │  └─ Session Manager    │
-                                 └─────────┬─────────────┘
-                                           │
-                              ┌────────────┼────────────┐
-                              ▼            ▼            ▼
-                         SQLite      ChromaDB     LLM API
-                        (state)     (history)   (Anthropic)
-                              
-        Dashboard (Next.js) ◄──── WebSocket ────┘
+Hotel (Phone)
+      │
+      ▼
+┌─────────────┐     mulaw audio      ┌─────────────────┐
+│   Twilio    │ ──────────────────── │  AssemblyAI STT  │
+│  (WebSocket)│                      │  (real-time)     │
+└─────────────┘                      └────────┬─────────┘
+                                              │ transcript
+                                              ▼
+                                     ┌─────────────────┐
+                                     │   VoicePipeline  │
+                                     │                  │
+                                     │  FactExtractor   │ ──► GPT-4o-mini
+                                     │  NegotiationBrain│ ──► GPT-4o
+                                     │  Guardrails      │
+                                     └────────┬─────────┘
+                                              │ tokens
+                                              ▼
+                                     ┌─────────────────┐
+                                     │  ElevenLabs TTS  │
+                                     │  (WebSocket)     │
+                                     └────────┬─────────┘
+                                              │ ulaw audio
+                                              ▼
+                                           Twilio → Hotel
+
+Campaign Controller (LangGraph)
+  └── Scores + prioritizes hotels
+  └── Spawns concurrent WorkerSessions
+  └── Monitors outcomes, retries, deduplicates
+
+Memory Layer (ChromaDB + Backend API)
+  └── Loads behavioral priors before each call
+  └── Extracts and stores patterns after each call
 ```
 
 ## Tech Stack
 
 - **Backend:** Python 3.11+ / FastAPI
-- **Database:** SQLite (session state) + ChromaDB (vector store)
-- **Voice:** Twilio (phone calls) + Deepgram (STT) + ElevenLabs or Cartesia (TTS)
-- **AI:** Anthropic Claude API (negotiation LLM)
-- **Math:** NumPy (utility scoring)
-- **Realtime:** FastAPI WebSockets
-- **Frontend:** Next.js/React (separate repo)
+- **Orchestration:** LangGraph StateGraph (worker + campaign graphs)
+- **LLM:** OpenAI GPT-4o (negotiation brain) + GPT-4o-mini (fact extraction)
+- **STT:** AssemblyAI real-time WebSocket
+- **TTS:** ElevenLabs WebSocket streaming
+- **Phone:** Twilio Programmable Voice
+- **Memory:** ChromaDB (vector) + backend REST API (structured)
+
+## API Keys Required
+
+Create a `.env` file in the project root with the following:
+
+```env
+# OpenAI
+OPENAI_API_KEY=sk-...
+OPENAI_MODEL=gpt-4o
+
+# AssemblyAI (real-time STT)
+ASSEMBLYAI_API_KEY=...
+
+# ElevenLabs (TTS)
+TTS_API_KEY=...
+TTS_VOICE_ID=...
+ELEVENLABS_MODEL_ID=eleven_turbo_v2_5
+
+# Twilio (outbound calls)
+TWILIO_ACCOUNT_SID=AC...
+TWILIO_AUTH_TOKEN=...
+TWILIO_PHONE_NUMBER=+1...
+
+# Public URL — must be reachable by Twilio (see Testing section)
+BASE_URL=https://your-ngrok-url.ngrok.io
+```
+
+Where to get each key:
+- **OpenAI:** platform.openai.com
+- **AssemblyAI:** assemblyai.com
+- **ElevenLabs:** elevenlabs.io (also grab a Voice ID from the voices library)
+- **Twilio:** console.twilio.com (buy a phone number with Voice capability)
 
 ## Setup
 
@@ -48,35 +89,111 @@ Vendor (Phone/Webhook)
 python -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env  # fill in API keys
-python -m app.seed    # seed ChromaDB with synthetic data
-uvicorn app.main:app --reload
+cp .env.example .env   # fill in keys from above
+uvicorn app.main:app --reload --port 8000
 ```
+
+## Testing with a Real Phone Number
+
+Twilio must be able to POST back to your server when a call connects. This requires a public URL — localhost will not work.
+
+**Step 1 — Expose your local server:**
+
+```bash
+# Install ngrok: https://ngrok.com
+ngrok http 8000
+# Copy the https URL it gives you, e.g. https://abc123.ngrok.io
+```
+
+Set `BASE_URL=https://abc123.ngrok.io` in your `.env`, then restart the server.
+
+**Step 2 — Start a campaign:**
+
+```bash
+curl -X POST http://localhost:8000/api/campaigns/test-campaign-1/start
+```
+
+This requires the backend to serve `GET /api/campaigns/test-campaign-1/targets` with hotel targets. If the backend is not yet available, use the script below instead.
+
+**Step 3 — Direct worker smoke test (no backend required):**
+
+```python
+# test_worker.py
+import asyncio
+from app.hotel.schemas import HotelTarget, WorkerSessionState
+from app.orchestration.worker_graph import WorkerSession, register_worker
+
+async def main():
+    target = HotelTarget(
+        hotel_id="hotel-test-1",
+        phone_number="+1XXXXXXXXXX",   # real hotel phone number
+        check_in="2026-05-01",
+        check_out="2026-05-03",
+        room_type="king",
+        target_rate=180.0,
+        max_rate=220.0,
+    )
+    state = WorkerSessionState(
+        session_id="test-session-1",
+        hotel_target=target,
+    )
+    session = WorkerSession(state)
+    register_worker(session)
+    result = await session.run()
+    print(result)
+
+asyncio.run(main())
+```
+
+When Twilio dials the hotel and the call connects, it will POST to `{BASE_URL}/voice/twilio-stream/test-session-1`, which opens the WebSocket and starts the full STT → LLM → TTS pipeline.
+
+## Campaign API
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `POST` | `/api/campaigns/{id}/start` | Start a campaign |
+| `GET` | `/api/campaigns/{id}/status` | Check campaign status |
+| `DELETE` | `/api/campaigns/{id}` | Cancel a running campaign |
 
 ## Project Structure
 
 ```
 app/
-├── main.py                 # FastAPI app, CORS, lifespan
+├── main.py
 ├── core/
-│   ├── config.py           # env vars, settings
-│   └── database.py         # SQLite + ChromaDB init
-├── models/
-│   ├── schemas.py          # Pydantic models
-│   └── enums.py            # negotiation states, strategies
-├── services/
-│   ├── scoring.py          # NumPy utility matrix
-│   ├── rag.py              # ChromaDB retrieval
-│   ├── llm.py              # Anthropic API interface
-│   ├── guardrails.py       # rule engine / validation
-│   ├── negotiation.py      # FSM orchestrator
-│   └── voice.py            # Twilio + Deepgram + TTS
-├── routers/
-│   ├── negotiations.py     # CRUD + WebSocket endpoints
-│   ├── webhooks.py         # vendor inbound (text)
-│   └── voice.py            # Twilio voice routes
-├── seed.py                 # seed synthetic history
-data/
-├── chroma/                 # ChromaDB persistent storage
-└── negotiations.db         # SQLite database
+│   ├── config.py              # env vars and settings
+│   ├── events.py              # async event bus
+│   └── shared_clients.py      # pooled HTTP + OpenAI clients
+├── hotel/
+│   ├── enums.py               # SessionStatus, NegotiationOutcome, MoveType
+│   ├── schemas.py             # HotelTarget, HotelQuote, AgentMove, WorkerSessionState
+│   ├── scoring.py             # rate scoring vs target/max
+│   └── guardrails.py          # negotiation safety rules
+├── llm/
+│   ├── openai_client.py       # GPT-4o async client
+│   ├── prompts.py             # all system prompts
+│   ├── fact_extractor.py      # extract rate quotes from transcript
+│   ├── negotiation_brain.py   # decide move + stream response
+│   └── post_call_analyzer.py  # post-call analysis and lessons
+├── voice/
+│   ├── assemblyai_stt.py      # AssemblyAI real-time WebSocket STT
+│   ├── elevenlabs_tts.py      # ElevenLabs WebSocket streaming TTS
+│   ├── twilio_bridge.py       # Twilio media stream adapter
+│   ├── pipeline.py            # full-duplex voice pipeline coordinator
+│   └── interruption.py        # barge-in detection
+├── memory/
+│   ├── feature_schemas.py     # HotelBehavioralFeature, HotelBehavioralProfile
+│   ├── behavioral_store.py    # ChromaDB + backend API memory layer
+│   └── memory_candidates.py   # post-call feature extraction
+├── orchestration/
+│   ├── session_lock.py        # per-hotel asyncio lock
+│   ├── worker_graph.py        # LangGraph worker StateGraph
+│   ├── worker_nodes.py        # worker node functions
+│   ├── worker_events.py       # lifecycle event emitter
+│   ├── campaign_graph.py      # LangGraph campaign StateGraph
+│   ├── campaign_nodes.py      # campaign node functions
+│   └── job_scorer.py          # priority scoring for job queue
+└── routers/
+    ├── voice.py               # Twilio WebSocket + TwiML endpoints
+    └── campaigns.py           # campaign start/status/cancel
 ```
