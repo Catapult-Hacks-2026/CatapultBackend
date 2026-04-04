@@ -16,13 +16,16 @@ class Settings(BaseSettings):
 
     tts_api_key: str = ""
     tts_voice_id: str = ""
+    tts_provider: str = "elevenlabs"
     elevenlabs_model_id: str = "eleven_turbo_v2_5"
 
     max_call_duration_seconds: int = 480
     worker_concurrency_limit: int = 5
 
     database_url: str = "sqlite+aiosqlite:///data/negotiations.db"
-    chroma_persist_dir: str = "data/chroma"
+    redis_url: str = "redis://localhost:6379/0"
+    chroma_persist_dir: str = "data/chroma"  # legacy; used only for one-time migration
+    session_lock_ttl: int = 900
 
     base_url: str = "http://localhost:8000"
 

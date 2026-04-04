@@ -80,7 +80,11 @@ def generate_negotiation_brief(negotiation_id: str) -> dict:
         json.dumps({"product_category": row["product_category"]}),
         top_k=5,
     )
-    competitor_history = retrieve_competitor_context(row["product_category"], top_k=5)
+    competitor_history = retrieve_competitor_context(
+        row["product_category"],
+        current_offer_text=json.dumps({"product_category": row["product_category"]}),
+        top_k=5,
+    )
 
     if not settings.anthropic_api_key or Anthropic is None:
         brief = _fallback_brief(dict(row), config, vendor_history)

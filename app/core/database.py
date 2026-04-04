@@ -1,14 +1,14 @@
 import sqlite3
 from pathlib import Path
 
-import chromadb
+import redis
 
 from app.core.config import get_settings
 
 settings = get_settings()
 
 DB_PATH = Path("data/negotiations.db")
-_chroma_client = None
+_redis_client: redis.Redis | None = None
 
 
 def _ensure_column(conn: sqlite3.Connection, table_name: str, column_name: str, definition: str) -> None:
@@ -70,6 +70,33 @@ def init_db() -> None:
             transcript TEXT DEFAULT '',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
+
+        CREATE TABLE IF NOT EXISTS quote_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            negotiation_id TEXT NOT NULL REFERENCES negotiations(id),
+            vendor_name TEXT NOT NULL,
+            product_category TEXT NOT NULL DEFAULT 'general',
+            extracted_facts JSON,
+            offer JSON,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS latest_quotes (
+            negotiation_id TEXT PRIMARY KEY REFERENCES negotiations(id),
+            vendor_name TEXT NOT NULL,
+            product_category TEXT NOT NULL DEFAULT 'general',
+            extracted_facts JSON,
+            offer JSON,
+            utility_score REAL,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS session_locks (
+            lock_key TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            expires_at TIMESTAMP NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
         """
     )
     _ensure_column(conn, "negotiations", "product_category", "TEXT NOT NULL DEFAULT 'general'")
@@ -77,19 +104,18 @@ def init_db() -> None:
     conn.commit()
     conn.close()
 
-
-def get_chroma() -> chromadb.ClientAPI:
-    global _chroma_client
-    if _chroma_client is None:
-        persist_dir = Path(settings.chroma_persist_dir)
-        persist_dir.mkdir(parents=True, exist_ok=True)
-        _chroma_client = chromadb.PersistentClient(path=str(persist_dir))
-    return _chroma_client
+    # One-time migration: move legacy ChromaDB data into Redis
+    from app.memory.behavioral_store import migrate_call_history_from_chroma
+    from app.services.rag import migrate_from_chroma
+    chroma_dir = settings.chroma_persist_dir
+    migrate_from_chroma(chroma_dir)
+    migrate_call_history_from_chroma(chroma_dir)
 
 
-def get_vendor_collection() -> chromadb.Collection:
-    client = get_chroma()
-    return client.get_or_create_collection(
-        name="vendor_history",
-        metadata={"hnsw:space": "cosine"},
-    )
+def get_redis() -> redis.Redis:
+    global _redis_client
+    if _redis_client is None:
+        _redis_client = redis.Redis.from_url(
+            settings.redis_url, decode_responses=True
+        )
+    return _redis_client

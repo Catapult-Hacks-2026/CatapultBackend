@@ -83,7 +83,84 @@ Where to get each key:
 - **ElevenLabs:** elevenlabs.io (also grab a Voice ID from the voices library)
 - **Twilio:** console.twilio.com (buy a phone number with Voice capability)
 
-## Setup
+## Prerequisites
+
+- Python 3.11+
+- [Redis](https://redis.io/docs/getting-started/) running locally (used for session locking and coordination)
+
+## Getting Started
+
+1. **Clone the repo and create a virtual environment:**
+
+   ```bash
+   git clone <repo-url>
+   cd catapult_main
+   python -m venv venv
+   source venv/bin/activate   # On Windows: venv\Scripts\activate
+   ```
+
+2. **Install dependencies:**
+
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+3. **Configure environment variables:**
+
+   ```bash
+   cp .env.example .env
+   ```
+
+   Open `.env` and fill in the required API keys (see [Environment Variables](#environment-variables) below).
+
+4. **Start Redis** (if not already running):
+
+   ```bash
+   redis-server
+   ```
+
+5. **Seed the database with synthetic history:**
+
+   ```bash
+   python -m app.seed
+   ```
+
+6. **Run the server:**
+
+   ```bash
+   uvicorn app.main:app --reload
+   ```
+
+   The API will be available at `http://localhost:8000`. Visit `http://localhost:8000/docs` for the interactive Swagger UI.
+
+## Environment Variables
+
+Copy `.env.example` to `.env` and fill in the values:
+
+| Variable | Description |
+|----------|-------------|
+| `OPENAI_API_KEY` | OpenAI API key for the negotiation LLM |
+| `ASSEMBLYAI_API_KEY` | AssemblyAI key for speech-to-text |
+| `TWILIO_ACCOUNT_SID` | Twilio account SID |
+| `TWILIO_AUTH_TOKEN` | Twilio auth token |
+| `TWILIO_PHONE_NUMBER` | Twilio phone number for outbound calls |
+| `TTS_API_KEY` | ElevenLabs API key for text-to-speech |
+| `TTS_VOICE_ID` | ElevenLabs voice ID |
+| `DATABASE_URL` | SQLite connection string (default: `sqlite+aiosqlite:///data/negotiations.db`) |
+| `REDIS_URL` | Redis connection string (default: `redis://localhost:6379/0`) |
+| `BASE_URL` | Public URL for Twilio callbacks (e.g. an ngrok URL for local dev) |
+
+### Exposing to Twilio (local development)
+
+For Twilio to reach your local server, use [ngrok](https://ngrok.com/):
+
+```bash
+ngrok http 8000
+```
+
+Then set `BASE_URL` in your `.env` to the ngrok forwarding URL.
+
+## Quick Start
 
 ```bash
 python -m venv venv

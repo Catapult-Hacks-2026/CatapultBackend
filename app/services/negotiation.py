@@ -294,7 +294,9 @@ def process_vendor_input(
         negotiation_id,
         negotiation["product_category"],
     )
-    competitor_history = retrieve_competitor_context(negotiation["product_category"], top_k=3)
+    competitor_history = retrieve_competitor_context(
+        negotiation["product_category"], current_offer_text=current_offer_text, top_k=3,
+    )
     conversation_history = [_serialize_message(row) for row in message_rows]
 
     context = {
