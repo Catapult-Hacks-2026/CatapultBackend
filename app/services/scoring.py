@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 import numpy as np
 
 from app.models.schemas import BuyerConfig, ScoringBreakdown, VendorOffer
@@ -85,3 +87,25 @@ def suggest_pivot(
         remaining_gap -= needed_improvement * weight
 
     return suggestions
+
+
+def compute_campaign_job_priority(
+    config: BuyerConfig,
+    priority: float = 0.5,
+    deadline=None,
+) -> float:
+    price_spread = max(config.max_unit_price - config.target_unit_price, 0.0)
+    quantity_factor = max(config.quantity, 1) / 1000
+    urgency = 0.5
+    if deadline is not None:
+        now = datetime.now(timezone.utc)
+        deadline_dt = deadline.astimezone(timezone.utc) if deadline.tzinfo else deadline.replace(tzinfo=timezone.utc)
+        remaining_hours = max((deadline_dt - now).total_seconds() / 3600, 1)
+        urgency = min(1.0, 24 / remaining_hours)
+    score = (
+        0.4 * min(price_spread / max(config.max_unit_price, 1), 1.0)
+        + 0.3 * min(quantity_factor, 1.0)
+        + 0.2 * min(max(priority, 0.0), 1.0)
+        + 0.1 * urgency
+    )
+    return round(score, 4)

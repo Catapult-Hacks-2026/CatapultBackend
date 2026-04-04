@@ -1,11 +1,12 @@
 import json
-from datetime import UTC, datetime
+from datetime import datetime, timezone
+from typing import Optional, Union
 
 from app.core.database import get_vendor_collection
 from app.models.schemas import VendorOffer
 
 
-def _safe_discount_pct(messages: list[dict], final_offer: VendorOffer | dict) -> float | None:
+def _safe_discount_pct(messages: list[dict], final_offer: Union[VendorOffer, dict]) -> Optional[float]:
     opening_price = None
     for message in messages:
         structured = message.get("structured_data") or {}
@@ -32,7 +33,7 @@ def _build_summary(
     negotiation_id: str,
     vendor_name: str,
     messages: list[dict],
-    final_offer: VendorOffer | dict | None,
+    final_offer: Optional[Union[VendorOffer, dict]],
     outcome: str,
 ) -> str:
     transcript = []
@@ -60,7 +61,7 @@ def add_negotiation_to_history(
     vendor_name: str,
     product_category: str,
     messages: list[dict],
-    final_offer: VendorOffer | dict | None,
+    final_offer: Optional[Union[VendorOffer, dict]],
     outcome: str,
 ) -> None:
     collection = get_vendor_collection()
@@ -72,7 +73,7 @@ def add_negotiation_to_history(
     metadata = {
         "vendor_name": vendor_name,
         "product_category": product_category,
-        "date": datetime.now(UTC).date().isoformat(),
+        "date": datetime.now(timezone.utc).date().isoformat(),
         "outcome": outcome,
         "final_unit_price": final_offer_data.get("unit_price"),
         "discount_pct": discount_pct,

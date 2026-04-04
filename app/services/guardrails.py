@@ -1,3 +1,5 @@
+from typing import Optional
+
 from app.models.schemas import AgentAction, BuyerConfig, GuardrailResult, VendorOffer
 from app.services.scoring import score_offer
 
@@ -11,7 +13,7 @@ def _contains_acceptance_language(message: str) -> bool:
 def validate_agent_action(
     action: AgentAction,
     config: BuyerConfig,
-    current_offer: VendorOffer | None = None,
+    current_offer: Optional[VendorOffer] = None,
     round_number: int = 1,
 ) -> GuardrailResult:
     violations: list[str] = []

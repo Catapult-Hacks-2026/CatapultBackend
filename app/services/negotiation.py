@@ -1,6 +1,7 @@
 import json
 import uuid
-from datetime import UTC, datetime
+from datetime import datetime, timezone
+from typing import Optional, Union
 
 from fastapi import HTTPException
 
@@ -18,7 +19,7 @@ from app.services.research import generate_negotiation_brief
 from app.services.scoring import score_offer, suggest_pivot
 
 
-def _parse_json_blob(payload: str | None) -> dict | list | None:
+def _parse_json_blob(payload: Optional[str]) -> Optional[Union[dict, list]]:
     if not payload:
         return None
     try:
@@ -50,8 +51,10 @@ def create_negotiation_record(
     config: BuyerConfig,
     product_category: str = "general",
     max_rounds: int = 10,
+    campaign_id: Optional[str] = None,
 ):
     negotiation_id = str(uuid.uuid4())
+    thread_id = str(uuid.uuid4())
     conn = get_db()
     conn.execute(
         """
@@ -59,24 +62,30 @@ def create_negotiation_record(
             id,
             vendor_name,
             product_category,
+            campaign_id,
+            thread_id,
             status,
             strategy,
             config,
             round_number,
             max_rounds,
+            worker_status,
             updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
         """,
         (
             negotiation_id,
             vendor_name,
             product_category,
+            campaign_id,
+            thread_id,
             NegotiationStatus.PENDING.value,
             strategy,
             config.model_dump_json(),
             max_rounds,
-            datetime.now(UTC).isoformat(),
+            "idle",
+            datetime.now(timezone.utc).isoformat(),
         ),
     )
     conn.commit()
@@ -89,6 +98,7 @@ def _serialize_message(row) -> dict:
     structured = _parse_json_blob(row["structured_data"])
     rag_context = _parse_json_blob(row["rag_context"])
     guardrail_log = _parse_json_blob(row["guardrail_log"])
+    extracted_facts = _parse_json_blob(row["extracted_facts"]) if "extracted_facts" in row.keys() else None
     return {
         "id": row["id"],
         "role": row["role"],
@@ -97,6 +107,7 @@ def _serialize_message(row) -> dict:
         "utility_score": row["utility_score"],
         "rag_context": rag_context,
         "guardrail_log": guardrail_log,
+        "extracted_facts": extracted_facts,
         "created_at": row["created_at"],
     }
 
@@ -165,7 +176,7 @@ def _persist_turn(
             json.dumps(current_offer.model_dump()),
             breakdown.total_utility,
             status,
-            datetime.now(UTC).isoformat(),
+            datetime.now(timezone.utc).isoformat(),
             negotiation_id,
         ),
     )
@@ -245,7 +256,7 @@ def _load_competing_offers(
 def process_vendor_input(
     negotiation_id: str,
     vendor_message: str,
-    vendor_offer: VendorOffer | None,
+    vendor_offer: Optional[VendorOffer],
 ) -> dict:
     negotiation, message_rows = _load_negotiation(negotiation_id)
     config = BuyerConfig.model_validate_json(negotiation["config"])

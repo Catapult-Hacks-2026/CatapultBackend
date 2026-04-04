@@ -1,6 +1,7 @@
 import asyncio
 import json
-from datetime import UTC, datetime
+from datetime import datetime, timezone
+from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, WebSocket, WebSocketDisconnect
 
@@ -24,7 +25,7 @@ from app.services.voice import initiate_call
 router = APIRouter()
 
 
-def _parse_offer(payload: str | None) -> VendorOffer | None:
+def _parse_offer(payload: Optional[str]) -> Optional[VendorOffer]:
     if not payload:
         return None
     return VendorOffer.model_validate_json(payload)
@@ -41,6 +42,12 @@ def _serialize_negotiation(row) -> NegotiationResponse:
         round_number=row["round_number"],
         utility_score=row["utility_score"],
         current_offer=offer,
+        campaign_id=row["campaign_id"] if "campaign_id" in row.keys() else None,
+        thread_id=row["thread_id"] if "thread_id" in row.keys() else None,
+        worker_status=row["worker_status"] if "worker_status" in row.keys() and row["worker_status"] else "idle",
+        manager_reached=bool(row["manager_reached"]) if "manager_reached" in row.keys() else False,
+        callback_requested=bool(row["callback_requested"]) if "callback_requested" in row.keys() else False,
+        final_outcome=row["final_outcome"] if "final_outcome" in row.keys() else None,
     )
 
 
@@ -133,6 +140,7 @@ def get_negotiation(negotiation_id: str) -> dict:
                 "utility_score": message["utility_score"],
                 "rag_context": json.loads(message["rag_context"]) if message["rag_context"] else None,
                 "guardrail_log": json.loads(message["guardrail_log"]) if message["guardrail_log"] else None,
+                "extracted_facts": json.loads(message["extracted_facts"]) if message["extracted_facts"] else None,
                 "created_at": message["created_at"],
             }
             for message in messages
@@ -157,6 +165,7 @@ def get_messages(negotiation_id: str) -> list[dict]:
             "utility_score": row["utility_score"],
             "rag_context": json.loads(row["rag_context"]) if row["rag_context"] else None,
             "guardrail_log": json.loads(row["guardrail_log"]) if row["guardrail_log"] else None,
+            "extracted_facts": json.loads(row["extracted_facts"]) if row["extracted_facts"] else None,
             "created_at": row["created_at"],
         }
         for row in rows
@@ -200,7 +209,7 @@ def update_negotiation(negotiation_id: str, payload: dict) -> dict:
 
     conn.execute(
         "UPDATE negotiations SET strategy = ?, config = ?, updated_at = ? WHERE id = ?",
-        (strategy, config.model_dump_json(), datetime.now(UTC).isoformat(), negotiation_id),
+        (strategy, config.model_dump_json(), datetime.now(timezone.utc).isoformat(), negotiation_id),
     )
     conn.commit()
     updated = conn.execute("SELECT * FROM negotiations WHERE id = ?", (negotiation_id,)).fetchone()
@@ -217,7 +226,7 @@ def approve_negotiation(negotiation_id: str) -> dict:
         raise HTTPException(status_code=404, detail="Negotiation not found")
     conn.execute(
         "UPDATE negotiations SET status = ?, updated_at = ? WHERE id = ?",
-        (NegotiationStatus.ACCEPTED.value, datetime.now(UTC).isoformat(), negotiation_id),
+        (NegotiationStatus.ACCEPTED.value, datetime.now(timezone.utc).isoformat(), negotiation_id),
     )
     conn.execute(
         """
@@ -246,7 +255,7 @@ def escalate_negotiation(negotiation_id: str) -> dict:
         raise HTTPException(status_code=404, detail="Negotiation not found")
     conn.execute(
         "UPDATE negotiations SET status = ?, updated_at = ? WHERE id = ?",
-        (NegotiationStatus.ESCALATED.value, datetime.now(UTC).isoformat(), negotiation_id),
+        (NegotiationStatus.ESCALATED.value, datetime.now(timezone.utc).isoformat(), negotiation_id),
     )
     conn.execute(
         """

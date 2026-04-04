@@ -53,6 +53,22 @@ python -m app.seed    # seed ChromaDB with synthetic data
 uvicorn app.main:app --reload
 ```
 
+## Demo Smoke Test
+
+Start the API locally, then run:
+
+```bash
+python3 scripts/demo_smoke_test.py
+```
+
+Or point it at a different host:
+
+```bash
+python3 scripts/demo_smoke_test.py --base-url http://127.0.0.1:8000
+```
+
+The script creates a negotiation, fetches the generated research brief, simulates a vendor turn, creates a batch negotiation, sends vendor messages to both vendors, and prints parsed summaries instead of raw JSON.
+
 ## Project Structure
 
 ```

@@ -1,5 +1,6 @@
 import json
-from datetime import UTC, datetime
+from datetime import datetime, timezone
+from typing import Optional
 
 from app.core.config import get_settings
 from app.core.database import get_db
@@ -10,7 +11,7 @@ from app.services.rag import retrieve_competitor_context, retrieve_vendor_contex
 settings = get_settings()
 
 
-def _parse_json_blob(payload: str | None) -> dict | None:
+def _parse_json_blob(payload: Optional[str]) -> Optional[dict]:
     if not payload:
         return None
     try:
@@ -55,7 +56,7 @@ def _fallback_brief(negotiation: dict, config: BuyerConfig, vendor_history: list
             "Escalate if the vendor insists on price above buyer max.",
             "Escalate if delivery extends beyond buyer maximum tolerance.",
         ],
-        "generated_at": datetime.now(UTC).isoformat(),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
         "source": "deterministic_fallback",
     }
 
@@ -109,13 +110,13 @@ def generate_negotiation_brief(negotiation_id: str) -> dict:
             model=settings.research_model or settings.negotiation_model,
             max_tokens=1200,
         )
-        brief.setdefault("generated_at", datetime.now(UTC).isoformat())
+        brief.setdefault("generated_at", datetime.now(timezone.utc).isoformat())
         brief.setdefault("source", settings.research_model or settings.negotiation_model)
 
     conn = get_db()
     conn.execute(
         "UPDATE negotiations SET research_brief = ?, updated_at = ? WHERE id = ?",
-        (json.dumps(brief), datetime.now(UTC).isoformat(), negotiation_id),
+        (json.dumps(brief), datetime.now(timezone.utc).isoformat(), negotiation_id),
     )
     conn.commit()
     conn.close()

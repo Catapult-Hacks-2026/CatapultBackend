@@ -1,9 +1,11 @@
+from typing import Optional
+
 from app.models.enums import Strategy
 from app.models.schemas import BuyerConfig, VendorOffer
 from app.services.scoring import score_offer
 
 
-def _seller_step(seller_config: dict, round_number: int, buyer_counter: VendorOffer | None) -> VendorOffer:
+def _seller_step(seller_config: dict, round_number: int, buyer_counter: Optional[VendorOffer]) -> VendorOffer:
     opening_price = float(seller_config.get("opening_price", seller_config.get("target_unit_price", 100.0)))
     min_unit_price = float(seller_config.get("min_unit_price", opening_price * 0.8))
     current_price = buyer_counter.unit_price if buyer_counter else opening_price

@@ -1,6 +1,6 @@
 import json
 import re
-from typing import Any
+from typing import Any, Optional
 
 try:
     from anthropic import Anthropic
@@ -8,8 +8,8 @@ except ImportError:  # pragma: no cover - depends on optional install state
     Anthropic = None
 
 from app.core.config import get_settings
-from app.models.enums import Strategy
-from app.models.schemas import AgentAction, VendorOffer
+from app.models.enums import NegotiationAction, Strategy
+from app.models.schemas import AgentAction, ExtractedFacts, VendorOffer
 
 settings = get_settings()
 
@@ -51,7 +51,7 @@ def invoke_json(
     system_prompt: str,
     user_prompt: str,
     retry_prompt: bool = False,
-    model: str | None = None,
+    model: Optional[str] = None,
     max_tokens: int = 1024,
 ) -> dict:
     if not settings.anthropic_api_key:
@@ -180,3 +180,58 @@ def extract_offer_from_message(vendor_message: str) -> VendorOffer:
     )
     payload = invoke_json(system_prompt, vendor_message)
     return VendorOffer.model_validate(payload)
+
+
+async def extract_facts_fast(transcript_window: list[str], context: dict) -> dict:
+    utterance = " ".join(item for item in transcript_window if item).strip()
+    if not utterance:
+        return ExtractedFacts().model_dump()
+    offer = extract_offer_from_message(utterance)
+    lower = utterance.lower()
+    facts = ExtractedFacts(
+        quoted_rate=offer.unit_price,
+        shipping_cost=offer.shipping_cost,
+        payment_terms_days=offer.payment_terms_days,
+        delivery_days=offer.delivery_days,
+        discount_authority="manager" if "manager" in lower else "front_desk",
+        refusals=[phrase for phrase in ["cannot", "won't", "not possible"] if phrase in lower],
+        negotiation_openness=0.2 if any(term in lower for term in ["final", "firm", "best we can do"]) else 0.7,
+    )
+    if "fee" in lower or "parking" in lower:
+        facts.fees = {"mentioned": True}
+    return facts.model_dump()
+
+
+async def decide_move_fast(session_state: dict, facts: dict, priors: dict) -> dict:
+    quoted_rate = facts.get("quoted_rate")
+    target_price = ((session_state.get("buyer_config") or {}).get("target_unit_price"))
+    if quoted_rate is not None and target_price is not None and float(quoted_rate) <= float(target_price):
+        action = NegotiationAction.ACCEPT.value
+        confidence = 0.84
+    elif facts.get("discount_authority") == "manager":
+        action = NegotiationAction.ESCALATE_MANAGER.value
+        confidence = 0.66
+    elif priors:
+        action = NegotiationAction.MENTION_COMPETITOR.value
+        confidence = 0.61
+    else:
+        action = NegotiationAction.ASK_LOWER_RATE.value
+        confidence = 0.58
+    return {"action": action, "confidence": confidence, "reasoning": "Deterministic MVP move selection"}
+
+
+async def generate_reply_fast(action: str, session_state: dict) -> str:
+    vendor_name = session_state.get("vendor_name", "there")
+    target_price = ((session_state.get("buyer_config") or {}).get("target_unit_price"))
+    if action == NegotiationAction.ACCEPT.value:
+        return "That rate works for us. Please send over the confirmation and next steps."
+    if action == NegotiationAction.ESCALATE_MANAGER.value:
+        return "If a manager can approve additional flexibility, we can likely close this today."
+    if action == NegotiationAction.MENTION_COMPETITOR.value:
+        return (
+            f"We are reviewing competing quotes in this category. If {vendor_name} can sharpen the package a bit, "
+            "we can keep you at the front of the shortlist."
+        )
+    if target_price is not None:
+        return f"We need to be closer to {target_price:.2f} on unit price to keep this moving."
+    return "We need a better commercial package to move forward."
