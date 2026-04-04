@@ -7,6 +7,7 @@ import chromadb
 import httpx
 
 from app.core.config import get_settings
+from app.core.urls import build_upstream_url
 from app.hotel.enums import NegotiationOutcome
 from app.hotel.schemas import HotelQuote
 from app.memory.feature_schemas import HotelBehavioralFeature, HotelBehavioralProfile
@@ -30,7 +31,7 @@ def _get_collection() -> chromadb.Collection:
 
 
 def _backend_url(path: str) -> str:
-    return f"{get_settings().base_url}{path}"
+    return build_upstream_url(path)
 
 
 def _apply_time_decay(features: list[HotelBehavioralFeature]) -> list[HotelBehavioralFeature]:
@@ -107,17 +108,18 @@ class BehavioralStore:
             logger.warning("ChromaDB query failed for hotel %s: %s", hotel_id, exc)
             return ""
 
-    async def store_call_summary(
+    async def store_session_summary(
         self,
         session_id: str,
         hotel_id: str,
         summary: str,
-        outcome: NegotiationOutcome,
+        outcome,
         quotes: list[HotelQuote],
     ) -> None:
+        outcome_value = outcome.value if hasattr(outcome, "value") else str(outcome)
         best_rate = min((q.nightly_rate for q in quotes), default=None)
         doc_text = (
-            f"Hotel: {hotel_id}. Outcome: {outcome.value}. Summary: {summary}."
+            f"Hotel: {hotel_id}. Outcome: {outcome_value}. Summary: {summary}."
             + (f" Best rate: ${best_rate:.2f}/night." if best_rate else "")
         )
         try:
@@ -127,13 +129,23 @@ class BehavioralStore:
                 documents=[doc_text],
                 metadatas=[{
                     "hotel_id": hotel_id,
-                    "outcome": outcome.value,
+                    "outcome": outcome_value,
                     "best_rate": str(best_rate) if best_rate else "",
                     "session_id": session_id,
                 }],
             )
         except Exception as exc:
             logger.error("ChromaDB upsert failed for session %s: %s", session_id, exc)
+
+    async def store_call_summary(
+        self,
+        session_id: str,
+        hotel_id: str,
+        summary: str,
+        outcome: NegotiationOutcome,
+        quotes: list[HotelQuote],
+    ) -> None:
+        await self.store_session_summary(session_id, hotel_id, summary, outcome, quotes)
 
     async def store_features(self, features: list[HotelBehavioralFeature]) -> None:
         if not features:

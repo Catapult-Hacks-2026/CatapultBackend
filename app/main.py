@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.database import init_db
 from app.routers.campaigns import router as campaigns_router
+from app.routers.email import router as email_router
 from app.routers.voice import router as voice_router
 
 
@@ -25,6 +26,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.include_router(voice_router, prefix="/voice", tags=["voice"])
+app.include_router(email_router, prefix="/email", tags=["email"])
 app.include_router(campaigns_router, prefix="/api", tags=["campaigns"])
 
 

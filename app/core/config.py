@@ -25,6 +25,14 @@ class Settings(BaseSettings):
     chroma_persist_dir: str = "data/chroma"
 
     base_url: str = "http://localhost:8000"
+    public_base_url: str = ""
+    upstream_api_base_url: str = ""
+
+    email_provider: str = "mailgun"
+    email_api_key: str = ""
+    email_webhook_secret: str = ""
+    email_from_address: str = ""
+    email_reply_domain: str = ""
 
     class Config:
         env_file = ".env"

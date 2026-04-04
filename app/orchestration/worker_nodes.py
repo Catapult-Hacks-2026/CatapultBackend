@@ -6,6 +6,7 @@ import httpx
 
 from app.core.config import get_settings
 from app.core.events import EventType, WorkerEvent, get_event_bus
+from app.core.urls import build_public_url, build_upstream_url
 from app.hotel.enums import NegotiationOutcome, SessionStatus
 from app.hotel.schemas import WorkerSessionState
 from app.orchestration.session_lock import get_lock_manager
@@ -18,7 +19,7 @@ _CROSS_SESSION_SKIP_THRESHOLD = 0.05
 
 
 def _backend_url(path: str) -> str:
-    return f"{get_settings().base_url}{path}"
+    return build_upstream_url(path)
 
 
 async def load_context_node(state: WorkerSessionState) -> dict:
@@ -81,7 +82,7 @@ async def start_voice_node(state: WorkerSessionState) -> dict:
     try:
         from twilio.rest import Client as TwilioClient
         client = TwilioClient(settings.twilio_account_sid, settings.twilio_auth_token)
-        twiml_url = f"{settings.base_url}/voice/twilio-stream/{state.session_id}"
+        twiml_url = build_public_url(f"/voice/twilio-stream/{state.session_id}")
         call = client.calls.create(
             to=state.hotel_target.phone_number,
             from_=settings.twilio_phone_number,

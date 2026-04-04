@@ -31,8 +31,20 @@ Only include features that are clearly supported by the transcript. Return {"fea
 async def extract_memory_candidates(
     session_state: WorkerSessionState,
 ) -> list[HotelBehavioralFeature]:
+    return await extract_memory_candidates_from_transcript(
+        session_id=session_state.session_id,
+        hotel_id=session_state.hotel_target.hotel_id,
+        transcript=session_state.transcript,
+    )
+
+
+async def extract_memory_candidates_from_transcript(
+    session_id: str,
+    hotel_id: str,
+    transcript: list[dict[str, str]],
+) -> list[HotelBehavioralFeature]:
     transcript_text = "\n".join(
-        f"{t['role']}: {t['content']}" for t in session_state.transcript
+        f"{t['role']}: {t['content']}" for t in transcript
     )
     if not transcript_text.strip():
         return []
@@ -40,7 +52,7 @@ async def extract_memory_candidates(
     try:
         data = await invoke_json(_EXTRACTION_SYSTEM, transcript_text, temperature=0.0)
     except Exception:
-        logger.exception("Memory candidate extraction failed for session %s", session_state.session_id)
+        logger.exception("Memory candidate extraction failed for session %s", session_id)
         return []
 
     features = []
@@ -48,12 +60,12 @@ async def extract_memory_candidates(
     for item in data.get("features", []):
         try:
             features.append(HotelBehavioralFeature(
-                hotel_id=session_state.hotel_target.hotel_id,
+                hotel_id=hotel_id,
                 feature_type=item["feature_type"],
                 feature_key=item["feature_key"],
                 value=item["value"],
                 confidence=float(item.get("confidence", 0.8)),
-                source_session_id=session_state.session_id,
+                source_session_id=session_id,
                 observed_at=now,
             ))
         except Exception:

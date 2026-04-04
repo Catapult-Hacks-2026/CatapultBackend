@@ -8,6 +8,10 @@ from typing import Any
 import httpx
 
 from app.core.config import get_settings
+from app.core.urls import build_upstream_url
+from app.email.enums import EmailOutcome
+from app.email.schemas import EmailSessionState, EmailTarget
+from app.email.worker import build_email_session_from_target
 from app.hotel.enums import NegotiationOutcome, SessionStatus  # noqa: F401 (SessionStatus used in spawned worker state)
 from app.hotel.schemas import HotelTarget, WorkerResult, WorkerSessionState
 from app.memory.behavioral_store import get_behavioral_store
@@ -20,7 +24,18 @@ _MAX_RETRIES = 2
 
 
 def _backend_url(path: str) -> str:
-    return f"{get_settings().base_url}{path}"
+    return build_upstream_url(path)
+
+
+def _parse_target(item: dict[str, Any]) -> HotelTarget | EmailTarget:
+    channel = str(item.get("channel", "")).lower()
+    if channel == "email" or (item.get("email_address") and not item.get("phone_number")):
+        return EmailTarget(**item)
+    return HotelTarget(**item)
+
+
+def _target_key(target: HotelTarget | EmailTarget) -> str:
+    return f"{getattr(target, 'channel', 'voice')}:{target.hotel_id}:{target.check_in}:{target.check_out}"
 
 
 # ---------------------------------------------------------------------------
@@ -37,15 +52,15 @@ async def ingest_targets_node(state: dict) -> dict:
             logger.error("ingest_targets: fetch failed: %s", exc)
             raw = []
 
-    target_jobs: dict[str, HotelTarget] = {}
+    target_jobs: dict[str, HotelTarget | EmailTarget] = {}
     for item in raw:
         try:
-            t = HotelTarget(**item)
-            target_jobs[t.hotel_id] = t
+            t = _parse_target(item)
+            target_jobs[_target_key(t)] = t
         except Exception:
             logger.warning("ingest_targets: skipping malformed target: %s", item)
 
-    existing: dict[str, HotelTarget] = state.get("target_jobs", {})
+    existing: dict[str, HotelTarget | EmailTarget] = state.get("target_jobs", {})
     existing.update(target_jobs)
 
     return {
@@ -66,12 +81,12 @@ def _dates_overlap(a_in: str, a_out: str, b_in: str, b_out: str) -> bool:
 
 
 async def deduplicate_node(state: dict) -> dict:
-    queued: list[tuple[float, HotelTarget]] = state.get("queued_jobs", [])
-    seen: dict[str, HotelTarget] = {}
-    deduped: list[tuple[float, HotelTarget]] = []
+    queued: list[tuple[float, HotelTarget | EmailTarget]] = state.get("queued_jobs", [])
+    seen: dict[str, HotelTarget | EmailTarget] = {}
+    deduped: list[tuple[float, HotelTarget | EmailTarget]] = []
 
     for score, target in queued:
-        key = target.hotel_id
+        key = f"{getattr(target, 'channel', 'voice')}:{target.hotel_id}"
         if key in seen:
             existing = seen[key]
             if _dates_overlap(
@@ -81,7 +96,11 @@ async def deduplicate_node(state: dict) -> dict:
                 # Keep the one with the lower target_rate (more aggressive)
                 if target.target_rate < existing.target_rate:
                     seen[key] = target
-                    deduped = [(s, t) for s, t in deduped if t.hotel_id != key]
+                    deduped = [
+                        (s, t)
+                        for s, t in deduped
+                        if f"{getattr(t, 'channel', 'voice')}:{t.hotel_id}" != key
+                    ]
                     deduped.append((score, target))
                 continue
         seen[key] = target
@@ -119,7 +138,7 @@ async def load_market_state_node(state: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 async def score_and_prioritize_node(state: dict) -> dict:
-    queued: list[tuple[float, HotelTarget]] = state.get("queued_jobs", [])
+    queued: list[tuple[float, HotelTarget | EmailTarget]] = state.get("queued_jobs", [])
     market_state: dict = state.get("market_state", {})
     signals: dict = market_state.get("signals", {})
     store = get_behavioral_store()
@@ -150,8 +169,8 @@ async def check_eligibility_node(state: dict) -> dict:
 
     confirmed_quotes: dict = market_state.get("confirmed_quotes", {})
     concurrency_remaining = settings.worker_concurrency_limit - len(active_workers)
-    eligible: list[tuple[float, HotelTarget]] = []
-    deferred: list[tuple[float, HotelTarget]] = []
+    eligible: list[tuple[float, HotelTarget | EmailTarget]] = []
+    deferred: list[tuple[float, HotelTarget | EmailTarget]] = []
 
     for score, target in queued:
         # Duplicate check 1: another session holds the lock for this hotel
@@ -200,26 +219,31 @@ _worker_tasks: dict[str, asyncio.Task] = {}
 
 
 async def spawn_workers_node(state: dict) -> dict:
-    from app.orchestration.worker_graph import build_worker_graph, register_worker, WorkerSession
+    from app.orchestration.worker_graph import register_worker, WorkerSession
 
-    queued: list[tuple[float, HotelTarget]] = state.get("queued_jobs", [])
+    queued: list[tuple[float, HotelTarget | EmailTarget]] = state.get("queued_jobs", [])
     active_workers: dict[str, str] = dict(state.get("active_workers", {}))
     campaign_id = state["campaign_id"]
 
     for _, target in queued:
         session_id = str(uuid.uuid4())
-        initial_state = WorkerSessionState(
-            session_id=session_id,
-            campaign_id=campaign_id,
-            hotel_target=target,
-        )
-        session = WorkerSession(initial_state)
-        register_worker(session)
+        if getattr(target, "channel", "voice") == "email":
+            session = await build_email_session_from_target(session_id, campaign_id, target)
+            task = asyncio.create_task(session.run(), name=f"email-worker-{session_id}")
+            active_workers[session_id] = "email_initializing"
+        else:
+            initial_state = WorkerSessionState(
+                session_id=session_id,
+                campaign_id=campaign_id,
+                hotel_target=target,
+            )
+            session = WorkerSession(initial_state)
+            register_worker(session)
+            task = asyncio.create_task(session.run(), name=f"worker-{session_id}")
+            active_workers[session_id] = SessionStatus.INITIALIZING.value
 
-        task = asyncio.create_task(session.run(), name=f"worker-{session_id}")
         _worker_tasks[session_id] = task
-        active_workers[session_id] = SessionStatus.INITIALIZING
-        logger.info("Spawned worker %s for hotel %s", session_id, target.hotel_id)
+        logger.info("Spawned worker %s for hotel %s via %s", session_id, target.hotel_id, getattr(target, "channel", "voice"))
 
     # queued_jobs consumed — workers are now active
     return {
@@ -236,7 +260,7 @@ async def monitor_workers_node(state: dict) -> dict:
     active_workers: dict[str, str] = dict(state.get("active_workers", {}))
     completed_jobs: list[WorkerResult] = list(state.get("completed_jobs", []))
     failed_jobs: list[WorkerResult] = list(state.get("failed_jobs", []))
-    retry_queue: list[tuple[HotelTarget, int]] = list(state.get("retry_queue", []))
+    retry_queue: list[tuple[HotelTarget | EmailTarget, int]] = list(state.get("retry_queue", []))
 
     still_active: dict[str, str] = {}
 
@@ -260,23 +284,25 @@ async def monitor_workers_node(state: dict) -> dict:
                 moves_made=[],
             ))
         else:
-            result: WorkerSessionState = task.result()
+            result: WorkerSessionState | EmailSessionState = task.result()
             best = min(result.quotes_received, key=lambda q: q.nightly_rate, default=None)
             worker_result = WorkerResult(
                 session_id=result.session_id,
-                status=result.status,
-                outcome=result.outcome,
+                status=result.status.value if hasattr(result.status, "value") else str(result.status),
+                outcome=result.outcome.value if result.outcome and hasattr(result.outcome, "value") else result.outcome,
                 best_quote=best,
                 transcript=result.transcript,
                 moves_made=result.moves_made,
             )
-            if result.outcome == NegotiationOutcome.RATE_CONFIRMED:
+            if result.outcome == NegotiationOutcome.RATE_CONFIRMED or result.outcome == EmailOutcome.RATE_CONFIRMED:
                 completed_jobs.append(worker_result)
             elif result.outcome == NegotiationOutcome.CALLBACK_REQUESTED:
                 # Put back in retry queue with delay handled by eligibility check
                 retry_queue.append((result.hotel_target, 0))
-            else:
+            elif result.outcome == EmailOutcome.FAILED:
                 failed_jobs.append(worker_result)
+            else:
+                completed_jobs.append(worker_result)
 
     return {
         "active_workers": still_active,
@@ -291,11 +317,11 @@ async def monitor_workers_node(state: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 async def handle_outcomes_node(state: dict) -> dict:
-    retry_queue: list[tuple[HotelTarget, int]] = list(state.get("retry_queue", []))
+    retry_queue: list[tuple[HotelTarget | EmailTarget, int]] = list(state.get("retry_queue", []))
     failed_jobs: list[WorkerResult] = list(state.get("failed_jobs", []))
     deferred: list[tuple[float, HotelTarget]] = list(state.get("_deferred_jobs", []))
 
-    promotable: list[tuple[float, HotelTarget]] = []
+    promotable: list[tuple[float, HotelTarget | EmailTarget]] = []
     exhausted: list[WorkerResult] = []
 
     for target, retry_count in retry_queue:
@@ -345,7 +371,7 @@ async def emit_summary_node(state: dict) -> dict:
         "total_completed": len(completed),
         "total_failed": len(failed),
         "best_rates": [
-            {"hotel_id": r.best_quote and r.best_quote.nightly_rate}
+            {"nightly_rate": r.best_quote.nightly_rate}
             for r in completed if r.best_quote
         ],
     }
