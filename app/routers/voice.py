@@ -3,7 +3,7 @@ import logging
 from fastapi import APIRouter, Request, WebSocket
 from fastapi.responses import Response
 
-from app.core.config import get_settings
+from app.core.urls import build_public_url
 from app.orchestration.worker_graph import get_active_worker
 
 router = APIRouter()
@@ -12,8 +12,7 @@ logger = logging.getLogger(__name__)
 
 @router.post("/twilio-stream/{session_id}")
 def twilio_stream_webhook(session_id: str) -> Response:
-    base_url = get_settings().base_url.rstrip("/")
-    stream_url = f"{base_url.replace('https://', 'wss://').replace('http://', 'ws://')}/voice/media-stream/{session_id}"
+    stream_url = build_public_url(f"/voice/media-stream/{session_id}").replace("https://", "wss://").replace("http://", "ws://")
     logger.info("twilio_stream_webhook: session_id=%s stream_url=%s", session_id, stream_url)
     twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>

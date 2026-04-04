@@ -28,6 +28,26 @@ async def invoke_json(
     return json.loads(response.choices[0].message.content)
 
 
+async def invoke_text(
+    system_prompt: str,
+    user_prompt: str,
+    model: str | None = None,
+    max_tokens: int = 512,
+    temperature: float = 0.4,
+) -> str:
+    settings = get_settings()
+    response = await get_openai_client().chat.completions.create(
+        model=model or settings.openai_model,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        max_tokens=max_tokens,
+        temperature=temperature,
+    )
+    return response.choices[0].message.content or ""
+
+
 async def stream_text(
     system_prompt: str,
     user_prompt: str,

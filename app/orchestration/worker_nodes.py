@@ -5,6 +5,7 @@ import logging
 from app.core.config import get_settings
 from app.core.shared_clients import get_http_client
 from app.core.events import EventType, WorkerEvent, get_event_bus
+from app.core.urls import build_public_url, build_upstream_url
 from app.hotel.enums import NegotiationOutcome, SessionStatus
 from app.hotel.schemas import WorkerSessionState
 from app.orchestration.session_lock import get_lock_manager
@@ -17,7 +18,7 @@ _CROSS_SESSION_SKIP_THRESHOLD = 0.05
 
 
 def _backend_url(path: str) -> str:
-    return f"{get_settings().base_url}{path}"
+    return build_upstream_url(path)
 
 
 async def load_context_node(state: WorkerSessionState) -> dict:
@@ -100,8 +101,8 @@ async def start_voice_node(state: WorkerSessionState) -> dict:
         if not destination_number:
             raise ValueError("No outbound destination configured. Set hotel_target.phone_number or TWILIO_TO_PHONE_NUMBER.")
         client = TwilioClient(settings.twilio_account_sid, settings.twilio_auth_token)
-        twiml_url = f"{settings.base_url}/voice/twilio-stream/{state.session_id}"
-        status_callback_url = f"{settings.base_url}/voice/status/{state.session_id}"
+        twiml_url = build_public_url(f"/voice/twilio-stream/{state.session_id}")
+        status_callback_url = build_public_url(f"/voice/status/{state.session_id}")
         logger.info(
             "start_voice_node: creating Twilio call session_id=%s campaign_id=%s hotel_id=%s to=%s from=%s twiml_url=%s status_callback_url=%s",
             state.session_id,

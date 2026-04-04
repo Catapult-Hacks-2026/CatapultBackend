@@ -34,6 +34,14 @@ class Settings(BaseSettings):
     session_lock_ttl: int = 900
 
     base_url: str = "http://localhost:8000"
+    public_base_url: str = ""
+    upstream_api_base_url: str = ""
+
+    email_provider: str = "mailgun"
+    email_api_key: str = ""
+    email_webhook_secret: str = ""
+    email_from_address: str = ""
+    email_reply_domain: str = ""
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

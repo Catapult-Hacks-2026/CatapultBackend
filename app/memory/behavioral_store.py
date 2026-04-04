@@ -30,7 +30,7 @@ def _market_index_key(market: str) -> str:
 
 
 def _backend_url(path: str) -> str:
-    return f"{get_settings().base_url}{path}"
+    return build_upstream_url(path)
 
 
 def _apply_time_decay(features: list[HotelBehavioralFeature]) -> list[HotelBehavioralFeature]:
@@ -106,18 +106,19 @@ class BehavioralStore:
             logger.warning("Redis query failed for hotel %s: %s", hotel_id, exc)
             return ""
 
-    async def store_call_summary(
+    async def store_session_summary(
         self,
         session_id: str,
         hotel_id: str,
         summary: str,
-        outcome: NegotiationOutcome,
+        outcome,
         quotes: list[HotelQuote],
         market: str = "",
     ) -> None:
+        outcome_value = outcome.value if hasattr(outcome, "value") else str(outcome)
         best_rate = min((q.nightly_rate for q in quotes), default=None)
         doc_text = (
-            f"Hotel: {hotel_id}. Outcome: {outcome.value}. Summary: {summary}."
+            f"Hotel: {hotel_id}. Outcome: {outcome_value}. Summary: {summary}."
             + (f" Best rate: ${best_rate:.2f}/night." if best_rate else "")
         )
         metadata = {
@@ -140,6 +141,16 @@ class BehavioralStore:
             pipe.execute()
         except Exception as exc:
             logger.error("Redis upsert failed for session %s: %s", session_id, exc)
+
+    async def store_call_summary(
+        self,
+        session_id: str,
+        hotel_id: str,
+        summary: str,
+        outcome: NegotiationOutcome,
+        quotes: list[HotelQuote],
+    ) -> None:
+        await self.store_session_summary(session_id, hotel_id, summary, outcome, quotes)
 
     async def store_features(self, features: list[HotelBehavioralFeature]) -> None:
         if not features:

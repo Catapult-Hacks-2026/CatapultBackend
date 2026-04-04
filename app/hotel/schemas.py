@@ -8,6 +8,7 @@ from app.hotel.enums import MoveType, NegotiationOutcome, SessionStatus
 
 
 class HotelTarget(BaseModel):
+    channel: str = "voice"
     hotel_id: str
     phone_number: str
     check_in: str
@@ -35,6 +36,8 @@ class AgentMove(BaseModel):
     reasoning: str = ""
     extracted_quote: HotelQuote | None = None
     should_terminate: bool = False
+    should_escalate: bool = False
+    escalation_reason: str = ""
     counter_rate: float | None = None
 
 
@@ -56,8 +59,8 @@ class WorkerSessionState(BaseModel):
 
 class WorkerResult(BaseModel):
     session_id: str
-    status: SessionStatus
-    outcome: NegotiationOutcome | None
+    status: str
+    outcome: str | None
     best_quote: HotelQuote | None
     transcript: list[dict[str, str]]
     moves_made: list[AgentMove]

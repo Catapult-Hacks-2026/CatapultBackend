@@ -9,6 +9,7 @@ from app.galileo.database import init_galileo_db
 from app.galileo.router import router as galileo_router
 from app.galileo.seed import seed_galileo_data
 from app.routers.campaigns import router as campaigns_router
+from app.routers.email import router as email_router
 from app.routers.hotel_data import router as hotel_data_router
 from app.routers.voice import router as voice_router
 
@@ -66,6 +67,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.include_router(voice_router, prefix="/voice", tags=["voice"])
+app.include_router(email_router, prefix="/email", tags=["email"])
 app.include_router(campaigns_router, prefix="/api", tags=["campaigns"])
 app.include_router(hotel_data_router, prefix="/api/hotel-data", tags=["hotel-data"])
 app.include_router(galileo_router, prefix="/api/galileo", tags=["galileo"])
