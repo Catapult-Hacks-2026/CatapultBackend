@@ -416,7 +416,7 @@ async def _trigger_twilio_call(agent: Agent, event: GalileoEvent) -> None:
     settings = get_settings()
     base_url = settings.base_url.rstrip("/")
     campaign_id = f"galileo-{event.id}"
-    destination_number = "+12609998910"
+    destination_number = "+15152032220"
 
     target = {
         "hotel_id": agent.companyId,
@@ -431,6 +431,7 @@ async def _trigger_twilio_call(agent: Agent, event: GalileoEvent) -> None:
             "hotel_name": agent.companyName,
             "location": event.location,
             "market": event.location,
+            "galileo_agent_id": agent.id,
         },
     }
 

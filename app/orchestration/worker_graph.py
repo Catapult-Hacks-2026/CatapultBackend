@@ -7,6 +7,7 @@ from typing import Any
 from fastapi import WebSocket
 from langgraph.graph import END, StateGraph
 
+from app.core.events import EventType, WorkerEvent, get_event_bus
 from app.hotel.schemas import WorkerSessionState
 from app.orchestration.worker_nodes import (
     acquire_lock_node,
@@ -33,6 +34,8 @@ logger = logging.getLogger(__name__)
 
 # Registry of active workers keyed by session_id
 _active_workers: dict[str, "WorkerSession"] = {}
+# Reverse lookup: galileo agent_id -> session_id
+_agent_to_session: dict[str, str] = {}
 
 
 class WorkerSession:
@@ -61,11 +64,15 @@ class WorkerSession:
             session_state=self._state,
             on_quote_received=self._on_quote_received,
             on_session_end=self._on_session_end,
+            on_transcript_update=self._on_transcript_update,
         )
         await self._pipeline.start()
 
     async def wait_for_call_end(self) -> None:
         await self._pipeline_done.wait()
+
+    def get_transcript_snapshot(self) -> list[dict[str, str]]:
+        return list(self._state.transcript)
 
     async def _on_quote_received(self, quote: Any) -> None:
         self._state.quotes_received.append(quote)
@@ -73,6 +80,20 @@ class WorkerSession:
     async def _on_session_end(self, state: WorkerSessionState) -> None:
         self._state = state
         self._pipeline_done.set()
+
+    async def _on_transcript_update(self, data: dict[str, Any]) -> None:
+        event_type_map = {
+            "transcript_partial": EventType.TRANSCRIPT_PARTIAL,
+            "transcript_final": EventType.TRANSCRIPT_FINAL,
+            "call_ended": EventType.CALL_ENDED,
+        }
+        event = WorkerEvent(
+            event_type=event_type_map[data["type"]],
+            session_id=self._state.session_id,
+            campaign_id=getattr(self._state, "campaign_id", ""),
+            payload=data,
+        )
+        await get_event_bus().publish(event)
 
 
 def build_worker_graph() -> Any:
@@ -122,9 +143,26 @@ def register_worker(session: WorkerSession) -> None:
     _active_workers[session._state.session_id] = session
 
 
+def register_agent_mapping(agent_id: str, session_id: str) -> None:
+    _agent_to_session[agent_id] = session_id
+
+
 def get_active_worker(session_id: str) -> WorkerSession | None:
     return _active_workers.get(session_id)
 
 
+def get_active_worker_for_agent(agent_id: str) -> tuple[str, WorkerSession] | None:
+    session_id = _agent_to_session.get(agent_id)
+    if session_id:
+        worker = _active_workers.get(session_id)
+        if worker:
+            return session_id, worker
+    return None
+
+
 def unregister_worker(session_id: str) -> None:
     _active_workers.pop(session_id, None)
+    # Clean up reverse mapping
+    to_remove = [aid for aid, sid in _agent_to_session.items() if sid == session_id]
+    for aid in to_remove:
+        _agent_to_session.pop(aid, None)

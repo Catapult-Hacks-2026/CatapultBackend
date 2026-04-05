@@ -220,7 +220,7 @@ _worker_tasks: dict[str, asyncio.Task] = {}
 
 
 async def spawn_workers_node(state: dict) -> dict:
-    from app.orchestration.worker_graph import build_worker_graph, register_worker, WorkerSession
+    from app.orchestration.worker_graph import build_worker_graph, register_agent_mapping, register_worker, WorkerSession
 
     queued: list[tuple[float, HotelTarget]] = state.get("queued_jobs", [])
     active_workers: dict[str, str] = dict(state.get("active_workers", {}))
@@ -235,6 +235,9 @@ async def spawn_workers_node(state: dict) -> dict:
         )
         session = WorkerSession(initial_state)
         register_worker(session)
+        galileo_agent_id = target.market_context.get("galileo_agent_id")
+        if galileo_agent_id:
+            register_agent_mapping(galileo_agent_id, session_id)
 
         task = asyncio.create_task(session.run(), name=f"worker-{session_id}")
         _worker_tasks[session_id] = task

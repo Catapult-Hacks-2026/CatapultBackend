@@ -46,11 +46,13 @@ class VoicePipeline:
         session_state: WorkerSessionState,
         on_quote_received: Callable[[HotelQuote], Coroutine[Any, Any, None]] | None = None,
         on_session_end: Callable[[WorkerSessionState], Coroutine[Any, Any, None]] | None = None,
+        on_transcript_update: Callable[[dict[str, Any]], Coroutine[Any, Any, None]] | None = None,
     ) -> None:
         self._bridge = twilio_bridge
         self._state = session_state
         self._on_quote_received = on_quote_received
         self._on_session_end = on_session_end
+        self._on_transcript_update = on_transcript_update
 
         self._interruption = InterruptionDetector()
         self._stt = AssemblyAIRealtimeSTT(
@@ -71,6 +73,8 @@ class VoicePipeline:
         monitor.cancel()
         await self._stt.close()
         await self._tts.close()
+        if self._on_transcript_update:
+            await self._on_transcript_update({"type": "call_ended"})
         if self._on_session_end:
             await self._on_session_end(self._state)
 
@@ -105,6 +109,8 @@ class VoicePipeline:
         if self._interruption.on_partial(text):
             logger.info("Barge-in detected, clearing Twilio playback")
             await self._bridge.clear_playback()
+        if self._on_transcript_update:
+            await self._on_transcript_update({"type": "transcript_partial", "text": text})
 
     async def _on_final_transcript(self, text: str, confidence: float, words: list) -> None:
         async with self._processing_lock:
@@ -143,6 +149,13 @@ class VoicePipeline:
         from app.hotel.enums import SessionStatus
 
         self._state.transcript.append({"role": "hotel", "content": text})
+        if self._on_transcript_update:
+            await self._on_transcript_update({
+                "type": "transcript_final",
+                "role": "hotel",
+                "content": text,
+                "index": len(self._state.transcript) - 1,
+            })
         self._state.status = SessionStatus.ACTIVE
         self._interruption.clear()
 
@@ -170,6 +183,13 @@ class VoicePipeline:
         move.response_text = response_text
         self._state.moves_made.append(move)
         self._state.transcript.append({"role": "agent", "content": response_text})
+        if self._on_transcript_update:
+            await self._on_transcript_update({
+                "type": "transcript_final",
+                "role": "agent",
+                "content": response_text,
+                "index": len(self._state.transcript) - 1,
+            })
 
         if move.should_terminate:
             self._done.set()

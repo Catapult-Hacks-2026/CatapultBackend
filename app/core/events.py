@@ -20,6 +20,9 @@ class EventType(str, Enum):
     WORKER_COMPLETED = "worker_completed"
     MARKET_UPDATE = "market_update"
     DUPLICATE_DETECTED = "duplicate_detected"
+    TRANSCRIPT_PARTIAL = "transcript_partial"
+    TRANSCRIPT_FINAL = "transcript_final"
+    CALL_ENDED = "call_ended"
 
 
 class WorkerEvent(BaseModel):
