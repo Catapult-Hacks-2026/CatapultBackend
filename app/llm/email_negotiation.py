@@ -80,7 +80,10 @@ async def generate_email_reply(
         f"{quote_hint}{counter_hint}"
         f"Recent thread:\n{transcript_text}"
     )
-    return (await invoke_text(EMAIL_RESPONSE_GENERATION_SYSTEM, user_prompt, temperature=0.5)).strip()
+    try:
+        return (await invoke_text(EMAIL_RESPONSE_GENERATION_SYSTEM, user_prompt, temperature=0.5)).strip()
+    except Exception:
+        return _fallback_reply(move, session_state, extraction)
 
 
 def _fallback_move(session_state: EmailSessionState, extraction: EmailExtractionResult) -> AgentMove:
@@ -113,4 +116,56 @@ def _fallback_move(session_state: EmailSessionState, extraction: EmailExtraction
         response_text="",
         reasoning="quote above target, counter politely",
         counter_rate=counter_rate,
+    )
+
+
+def _fallback_reply(
+    move: AgentMove,
+    session_state: EmailSessionState,
+    extraction: EmailExtractionResult,
+) -> str:
+    target = session_state.email_target
+    contact_name = target.contact_name.strip()
+    greeting = f"Hello {contact_name}," if contact_name else "Hello,"
+    stay = f"{target.check_in} to {target.check_out}"
+    room_line = f" for a {target.room_type} stay" if target.room_type else ""
+
+    if move.move_type == MoveType.ACCEPT:
+        nightly_rate = extraction.quote.nightly_rate if extraction.quote is not None else target.target_rate
+        return (
+            f"{greeting}\n\n"
+            f"Thank you for confirming the rate. ${nightly_rate:.0f} per night works for the requested stay "
+            f"({stay}){room_line}. Please send over the next non-payment steps and any standard terms for review.\n\n"
+            "Best,\nCatapult Travel"
+        )
+
+    if move.move_type == MoveType.COUNTER and move.counter_rate is not None:
+        return (
+            f"{greeting}\n\n"
+            f"Thank you for the update. We would be interested in moving forward if you can do "
+            f"${move.counter_rate:.0f} per night for the requested stay ({stay}){room_line}. "
+            "Please let me know if that is workable.\n\n"
+            "Best,\nCatapult Travel"
+        )
+
+    if move.move_type in {MoveType.PROBE, MoveType.ANCHOR, MoveType.CONCEDE}:
+        return (
+            f"{greeting}\n\n"
+            f"Thank you for the details. Could you share your best available nightly rate{room_line} "
+            f"for {stay}, along with any inclusions or fees?\n\n"
+            "Best,\nCatapult Travel"
+        )
+
+    if move.move_type == MoveType.CLOSE or move.should_escalate:
+        return (
+            f"{greeting}\n\n"
+            "Thank you for the information. I need to route the next steps internally and will follow up shortly.\n\n"
+            "Best,\nCatapult Travel"
+        )
+
+    return (
+        f"{greeting}\n\n"
+        f"I’m reaching out regarding availability and rates{room_line} for {stay}. "
+        "Could you share your best available offer?\n\n"
+        "Best,\nCatapult Travel"
     )

@@ -3,16 +3,24 @@ from __future__ import annotations
 import asyncio
 import logging
 from email.utils import parseaddr
+from pathlib import Path
 
 from app.core.events import EventType, WorkerEvent, get_event_bus
 from app.core.shared_clients import get_http_client
 from app.core.urls import build_upstream_url
 from app.core.config import get_settings
+from app.email.contract_artifacts import (
+    build_contract_artifacts,
+    build_receipt_email_body,
+    build_receipt_email_subject,
+    resolve_receipt_recipient,
+)
 from app.email.enums import EmailDirection, EmailOutcome, EmailSessionStatus
 from app.email.guardrails import validate_email_turn
 from app.email.mailgun_provider import MailgunProvider
 from app.email.parser import build_default_subject
 from app.email.schemas import (
+    EmailAttachment,
     EmailMessage,
     EmailSessionState,
     EmailTarget,
@@ -26,8 +34,6 @@ from app.memory.behavioral_store import get_behavioral_store
 from app.memory.memory_candidates import extract_memory_candidates_from_transcript
 
 logger = logging.getLogger(__name__)
-
-
 def _provider_for_settings() -> MailgunProvider:
     provider = get_settings().email_provider.lower()
     if provider != "mailgun":
@@ -228,10 +234,21 @@ class EmailWorkerSession:
         if self._state.status not in (EmailSessionStatus.ESCALATED, EmailSessionStatus.FAILED):
             self._state.status = EmailSessionStatus.COMPLETED
 
-        await self._sync_session()
         analysis = await analyze_email_thread(self._state)
         if self._state.outcome is None:
             self._state.outcome = analysis.outcome
+        receipt_recipient = resolve_receipt_recipient(self._state)
+        if receipt_recipient:
+            try:
+                artifacts = await build_contract_artifacts(self._state)
+                await self._send_receipt_email(receipt_recipient, artifacts.pdf_path)
+                if self._state.receipt_artifacts is not None:
+                    self._state.receipt_artifacts.email_sent_to = receipt_recipient
+            except Exception as exc:
+                logger.warning("email receipt send failed for %s: %s", self._state.session_id, exc)
+                self._state.error_log.append(f"receipt_send_failed: {exc}")
+
+        await self._sync_session()
         store = get_behavioral_store()
         await store.store_session_summary(
             session_id=self._state.session_id,
@@ -257,6 +274,38 @@ class EmailWorkerSession:
             payload={"channel": "email", "outcome": self._state.outcome.value},
         ))
 
+    async def _send_receipt_email(self, recipient: str, pdf_path: str) -> None:
+        if self._state.contract_details is None:
+            return
+
+        pdf_file = Path(pdf_path)
+        subject = build_receipt_email_subject(
+            self._state.contract_details,
+            self._state.outcome.value if self._state.outcome else None,
+        )
+        outbound = OutboundEmail(
+            to_address=recipient,
+            subject=subject,
+            text=build_receipt_email_body(
+                self._state.contract_details,
+                session_state=self._state,
+                outcome=self._state.outcome.value if self._state.outcome else None,
+            ),
+            metadata={
+                "session_id": self._state.session_id,
+                "channel": "email",
+                "artifact_type": "negotiation_report",
+            },
+            attachments=[
+                EmailAttachment(
+                    filename=pdf_file.name,
+                    content_type="application/pdf",
+                    data=pdf_file.read_bytes(),
+                )
+            ],
+        )
+        await self._provider.send_message(outbound)
+
     async def _sync_session(self) -> None:
         payload = {
             "session_id": self._state.session_id,
@@ -268,6 +317,8 @@ class EmailWorkerSession:
             "subject": self._state.subject,
             "reply_address": self._state.reply_address,
             "escalation_reason": self._state.escalation_reason,
+            "contract_details": self._state.contract_details.model_dump() if self._state.contract_details else None,
+            "receipt_artifacts": self._state.receipt_artifacts.model_dump() if self._state.receipt_artifacts else None,
         }
         try:
             await get_http_client().post(build_upstream_url("/api/email/sessions/"), json=payload)

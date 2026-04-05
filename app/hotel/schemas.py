@@ -4,6 +4,7 @@ from typing import Annotated, Any
 
 from pydantic import BaseModel, Field
 
+from app.artifacts.schemas import NegotiatedRateAgreement, ReceiptArtifacts
 from app.hotel.enums import MoveType, NegotiationOutcome, SessionStatus
 
 
@@ -18,6 +19,7 @@ class HotelTarget(BaseModel):
     max_rate: float
     priority_score: float = 0.0
     market_context: dict[str, Any] = Field(default_factory=dict)
+    campaign_metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class HotelQuote(BaseModel):
@@ -55,6 +57,8 @@ class WorkerSessionState(BaseModel):
     next_move: AgentMove | None = None
     error_log: list[str] = Field(default_factory=list)
     outcome: NegotiationOutcome | None = None
+    contract_details: NegotiatedRateAgreement | None = None
+    receipt_artifacts: ReceiptArtifacts | None = None
 
 
 class WorkerResult(BaseModel):
@@ -65,3 +69,5 @@ class WorkerResult(BaseModel):
     transcript: list[dict[str, str]]
     moves_made: list[AgentMove]
     memory_candidates: list[dict[str, Any]] = Field(default_factory=list)
+    contract_details: NegotiatedRateAgreement | None = None
+    receipt_artifacts: ReceiptArtifacts | None = None

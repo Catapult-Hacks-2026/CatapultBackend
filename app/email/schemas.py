@@ -5,6 +5,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from app.artifacts.schemas import EmailAttachment, NegotiatedRateAgreement, ReceiptArtifacts
 from app.email.enums import EmailDirection, EmailOutcome, EmailSessionStatus
 from app.hotel.schemas import AgentMove, HotelQuote
 
@@ -68,6 +69,8 @@ class EmailSessionState(BaseModel):
     escalation_reason: str = ""
     needs_human_review: bool = False
     error_log: list[str] = Field(default_factory=list)
+    contract_details: NegotiatedRateAgreement | None = None
+    receipt_artifacts: ReceiptArtifacts | None = None
 
 
 class OutboundEmail(BaseModel):
@@ -78,6 +81,7 @@ class OutboundEmail(BaseModel):
     in_reply_to: str = ""
     references: list[str] = Field(default_factory=list)
     metadata: dict[str, str] = Field(default_factory=dict)
+    attachments: list[EmailAttachment] = Field(default_factory=list)
 
 
 class SentEmailReceipt(BaseModel):

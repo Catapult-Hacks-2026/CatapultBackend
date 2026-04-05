@@ -1,0 +1,33 @@
+{
+  "documentTitle": "Corporate Negotiated Rate Agreement - 2026",
+  "galileoReferenceId": "GAL-8492-ORD",
+  "parties": {
+    "clientName": "Acme Travel",
+    "vendorName": "hotel-ord"
+  },
+  "term": {
+    "startDate": "2026-06-01",
+    "endDate": "2026-06-03"
+  },
+  "rateMatrix": [
+    {
+      "roomOrFareType": "Deluxe King",
+      "negotiatedRateUSD": 189.0,
+      "discountFromBAR": "N/A"
+    }
+  ],
+  "criticalClauses": {
+    "inventoryGuarantee": "LRA (Last Room Availability)",
+    "blackoutDates": [
+      "None"
+    ],
+    "cancellationPolicy": "48 hours prior"
+  },
+  "concessions": [
+    "Complimentary Wi-Fi",
+    "Breakfast included"
+  ],
+  "billingAndSettlement": {
+    "method": "Transient - Employee Corporate Card"
+  }
+}
