@@ -98,8 +98,19 @@ def _build_brain_context(session_state: WorkerSessionState) -> str:
     if prior_summary:
         lines.append(f"Prior call patterns: {prior_summary}")
 
-    # Market intelligence: historic rates and past deal outcomes from Redis
-    market_brief = priors.get("market_brief")
+    # Market intelligence: pull directly from Redis/SQLite to avoid
+    # stale graph-state copies that never reach the pipeline.
+    from app.services.market_data import get_market_context
+    try:
+        check_in_month = None
+        if target.check_in:
+            try:
+                check_in_month = int(target.check_in.split("-")[1])
+            except (IndexError, ValueError):
+                pass
+        market_brief = get_market_context(hotel_name, location, check_in_month)
+    except Exception:
+        market_brief = priors.get("market_brief", "")
     if market_brief:
         lines.append(f"\n{market_brief}")
 

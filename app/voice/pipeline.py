@@ -63,6 +63,7 @@ class VoicePipeline:
         self._tts = ElevenLabsStreamingTTS()
         self._done = asyncio.Event()
         self._processing_lock = asyncio.Lock()
+        self._pending_hangup_mark: str | None = None
 
     async def start(self) -> None:
         await self._stt.connect()
@@ -88,6 +89,11 @@ class VoicePipeline:
                     audio = event.get("_audio_bytes", b"")
                     if audio:
                         await self._stt.send_audio(audio)
+                elif event_type == "mark":
+                    mark_name = event.get("mark", {}).get("name", "")
+                    if mark_name == self._pending_hangup_mark:
+                        logger.info("Hangup mark received, ending call")
+                        self._done.set()
                 elif event_type == "stop":
                     logger.info("Twilio stream stopped")
                     self._done.set()
@@ -99,11 +105,23 @@ class VoicePipeline:
         settings = get_settings()
         max_duration = settings.max_call_duration_seconds
         start = asyncio.get_event_loop().time()
+        hangup_mark_at: float | None = None
         while not self._done.is_set():
-            await asyncio.sleep(10)
-            if asyncio.get_event_loop().time() - start > max_duration:
+            await asyncio.sleep(1)
+            now = asyncio.get_event_loop().time()
+            if now - start > max_duration:
                 logger.warning("Session %s exceeded max duration", self._state.session_id)
                 self._done.set()
+                break
+            # Safety timeout: if we sent a hangup mark but never got the
+            # callback, force-terminate after 10 seconds.
+            if self._pending_hangup_mark is not None:
+                if hangup_mark_at is None:
+                    hangup_mark_at = now
+                elif now - hangup_mark_at > 10:
+                    logger.warning("Hangup mark timeout, forcing termination")
+                    self._done.set()
+                    break
 
     async def _on_partial_transcript(self, text: str) -> None:
         # Feed partial transcripts to interruption detector while agent is speaking
@@ -194,7 +212,17 @@ class VoicePipeline:
             })
 
         if move.should_terminate:
-            self._done.set()
+            # Send a Twilio mark after the final audio. The inbound loop
+            # will fire _done.set() when Twilio confirms the audio has
+            # finished playing, so the caller hears the full message
+            # before the call is terminated.
+            try:
+                mark_id = await self._bridge.send_mark("hangup")
+                self._pending_hangup_mark = mark_id
+                logger.info("Termination mark sent, waiting for playback to finish")
+            except Exception:
+                logger.warning("Failed to send hangup mark, terminating immediately")
+                self._done.set()
 
     async def _decide_with_guardrails(self) -> AgentMove:
         guardrail_feedback: str | None = None
