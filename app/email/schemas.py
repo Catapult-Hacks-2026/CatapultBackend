@@ -60,6 +60,7 @@ class EmailSessionState(BaseModel):
     reply_address: str = ""
     external_thread_id: str = ""
     behavioral_priors: dict[str, Any] = Field(default_factory=dict)
+    report_summary: str = ""
     last_inbound_message: EmailMessage | None = None
     last_outbound_message: EmailMessage | None = None
     messages: list[EmailMessage] = Field(default_factory=list)

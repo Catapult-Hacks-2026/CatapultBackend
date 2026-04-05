@@ -227,6 +227,7 @@ async def post_call_node(state: WorkerSessionState) -> dict:
     try:
         analysis = await analyze_call(state)
         state.outcome = analysis.outcome
+        state.report_summary = analysis.summary
         receipt_recipient = resolve_receipt_recipient(state)
         if receipt_recipient:
             try:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 ARTIFACT_ROOT = Path("data/email_artifacts")
 DETAILS_URL_PLACEHOLDER = "https://example.com/galileo/reports"
+DEMO_REPORT_RECIPIENT = "jeffreytseng07@gmail.com"
 RECEIPT_RECIPIENT_KEYS = (
     "receipt_email",
     "traveler_email",
@@ -40,6 +42,11 @@ def _session_target(session_state: Any) -> Any:
     return getattr(session_state, "email_target", None) or getattr(session_state, "hotel_target", None)
 
 
+def _report_summary(session_state: Any) -> str:
+    value = getattr(session_state, "report_summary", "")
+    return value.strip() if isinstance(value, str) else ""
+
+
 def _market_context(session_state: Any) -> dict[str, Any]:
     target = _session_target(session_state)
     return getattr(target, "market_context", {}) or {}
@@ -56,6 +63,99 @@ def _format_rate(rate: float | str) -> str:
     return str(rate)
 
 
+def _has_text(value: Any) -> bool:
+    return isinstance(value, str) and value.strip() and value.strip().lower() not in {"n/a", "none", "null", "unknown"}
+
+
+def _has_value(value: Any) -> bool:
+    if isinstance(value, str):
+        return _has_text(value)
+    return value is not None
+
+
+def _summary_text(session_state: Any) -> str:
+    summary = _report_summary(session_state)
+    if summary:
+        return summary
+    transcript = getattr(session_state, "transcript", None) or []
+    if transcript:
+        latest = transcript[-1].get("content", "")
+        if isinstance(latest, str):
+            return latest.strip()
+    return ""
+
+
+def _extract_first_rate(text: str) -> float | None:
+    match = re.search(r"\$?\s*(\d{2,4}(?:\.\d{1,2})?)\s*(?:usd|dollars)?\s*(?:/ ?night|per night|nightly)?", text, re.IGNORECASE)
+    if not match:
+        return None
+    try:
+        return float(match.group(1))
+    except ValueError:
+        return None
+
+
+def _extract_percentage(text: str) -> str:
+    match = re.search(r"(\d{1,2}(?:\.\d+)?)\s*%", text)
+    return f"{match.group(1)}%" if match else "N/A"
+
+
+def _extract_cancellation_policy(text: str) -> str:
+    patterns = [
+        r"(\d+\s*(?:hour|hours|day|days)\s+prior)",
+        r"(same day\s+\d{1,2}:\d{2}\s*(?:am|pm)?)",
+        r"(non-refundable)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            return match.group(1)
+    return "N/A"
+
+
+def _extract_concessions(text: str) -> list[str]:
+    lowered = text.lower()
+    concessions: list[str] = []
+    if "breakfast" in lowered:
+        concessions.append("Breakfast included")
+    if "wifi" in lowered or "wi-fi" in lowered:
+        concessions.append("Complimentary Wi-Fi")
+    if "parking" in lowered:
+        concessions.append("Parking included")
+    if "late checkout" in lowered:
+        concessions.append("Late checkout")
+    return concessions
+
+
+def _extract_inventory_guarantee(text: str) -> str:
+    lowered = text.lower()
+    if "last room availability" in lowered or re.search(r"\blra\b", lowered):
+        return "LRA (Last Room Availability)"
+    return "NLRA (Non-Last Room Availability)"
+
+
+def _summary_hints(session_state: Any) -> dict[str, Any]:
+    summary = _summary_text(session_state)
+    if not summary:
+        return {}
+
+    hints: dict[str, Any] = {}
+    rate = _extract_first_rate(summary)
+    if rate is not None:
+        hints["rate"] = rate
+    discount = _extract_percentage(summary)
+    if discount != "N/A":
+        hints["discount"] = discount
+    cancellation_policy = _extract_cancellation_policy(summary)
+    if cancellation_policy != "N/A":
+        hints["cancellation_policy"] = cancellation_policy
+    concessions = _extract_concessions(summary)
+    if concessions:
+        hints["concessions"] = concessions
+    hints["inventory_guarantee"] = _extract_inventory_guarantee(summary)
+    return hints
+
+
 def _infer_location(contract: NegotiatedRateAgreement, session_state: Any = None) -> str:
     if session_state is not None:
         metadata = _metadata(session_state)
@@ -68,6 +168,10 @@ def _infer_location(contract: NegotiatedRateAgreement, session_state: Any = None
 
 
 def _conversation_summary(contract: NegotiatedRateAgreement, session_state: Any = None, outcome: str | None = None) -> str:
+    if session_state is not None:
+        summary = _report_summary(session_state)
+        if summary:
+            return summary
     rate_item = contract.rateMatrix[0] if contract.rateMatrix else None
     rate_text = _format_rate(rate_item.negotiatedRateUSD) if rate_item else "N/A"
     concessions = ", ".join(contract.concessions or ["None"])
@@ -89,6 +193,7 @@ def _conversation_summary(contract: NegotiatedRateAgreement, session_state: Any 
 def _pricing_rationale_lines(contract: NegotiatedRateAgreement, session_state: Any = None) -> list[str]:
     lines: list[str] = []
     market_context = _market_context(session_state) if session_state is not None else {}
+    summary_hints = _summary_hints(session_state) if session_state is not None else {}
 
     try:
         start = datetime.strptime(contract.term.startDate, "%Y-%m-%d")
@@ -110,9 +215,10 @@ def _pricing_rationale_lines(contract: NegotiatedRateAgreement, session_state: A
         "which materially affects pricing flexibility."
     )
 
-    if contract.concessions:
+    concessions = [item for item in contract.concessions if _has_text(item)]
+    if concessions:
         lines.append(
-            f"Concessions offset: {', '.join(contract.concessions)} helped improve total trip value even if the base rate did not move further."
+            f"Concessions offset: {', '.join(concessions)} helped improve total trip value even if the base rate did not move further."
         )
 
     target = _session_target(session_state) if session_state is not None else None
@@ -146,6 +252,12 @@ def _pricing_rationale_lines(contract: NegotiatedRateAgreement, session_state: A
     else:
         lines.append("External risk factor: no geopolitical or extraordinary external disruption was explicitly identified.")
 
+    summary = _report_summary(session_state) if session_state is not None else ""
+    if summary:
+        lines.append(f"Call summary signal: {summary}")
+    if summary_hints.get("rate") is not None:
+        lines.append(f"Structured summary hint: the analyzer surfaced a working rate of ${summary_hints['rate']:,.0f}.")
+
     return lines
 
 
@@ -156,7 +268,7 @@ def resolve_receipt_recipient(session_state: Any) -> str:
         value = metadata.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()
-    return ""
+    return DEMO_REPORT_RECIPIENT
 
 
 def build_receipt_email_subject(contract: NegotiatedRateAgreement, outcome: str | None = None) -> str:
@@ -173,32 +285,47 @@ def build_receipt_email_body(
     rate_item = contract.rateMatrix[0] if contract.rateMatrix else None
     prepared_at = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
     location = _infer_location(contract, session_state)
-    concessions = ", ".join(contract.concessions or ["None"])
-    details = [
-        f"Rate: {_format_rate(rate_item.negotiatedRateUSD) if rate_item else 'N/A'}",
-        f"Room Type: {rate_item.roomOrFareType if rate_item else 'N/A'}",
-        f"Dates: {contract.term.startDate} to {contract.term.endDate}",
-        f"Location: {location}",
-        f"Inventory Guarantee: {contract.criticalClauses.inventoryGuarantee}",
-        f"Cancellation Policy: {contract.criticalClauses.cancellationPolicy or 'N/A'}",
-        f"Concessions: {concessions}",
-        f"Billing Method: {contract.billingAndSettlement.method}",
-        f"Report Time: {prepared_at}",
-    ]
-    return "\n".join([
+    details: list[str] = []
+    if rate_item and _has_value(rate_item.negotiatedRateUSD):
+        details.append(f"Rate: {_format_rate(rate_item.negotiatedRateUSD)}")
+    if rate_item and _has_text(rate_item.roomOrFareType):
+        details.append(f"Room Type: {rate_item.roomOrFareType}")
+    if _has_text(contract.term.startDate) and _has_text(contract.term.endDate):
+        details.append(f"Dates: {contract.term.startDate} to {contract.term.endDate}")
+    if _has_text(location):
+        details.append(f"Location: {location}")
+    if _has_text(contract.criticalClauses.inventoryGuarantee):
+        details.append(f"Inventory Guarantee: {contract.criticalClauses.inventoryGuarantee}")
+    if _has_text(contract.criticalClauses.cancellationPolicy):
+        details.append(f"Cancellation Policy: {contract.criticalClauses.cancellationPolicy}")
+    concessions = [item for item in contract.concessions if _has_text(item)]
+    if concessions:
+        details.append(f"Concessions: {', '.join(concessions)}")
+    if _has_text(contract.billingAndSettlement.method):
+        details.append(f"Billing Method: {contract.billingAndSettlement.method}")
+    details.append(f"Report Time: {prepared_at}")
+
+    lines = [
         "Hello,",
         "",
         "After negotiating with the hotel, this is the best deal we have gotten:",
         "",
-        *details,
-        "",
-        f"Conversation Summary: {_conversation_summary(contract, session_state, outcome)}",
+    ]
+    lines.extend(details)
+    summary = _conversation_summary(contract, session_state, outcome)
+    if _has_text(summary):
+        lines.extend([
+            "",
+            f"Conversation Summary: {summary}",
+        ])
+    lines.extend([
         "",
         f"If you wish to know more, view details at {detail_url}.",
         "",
         "Best,",
         "Galileo",
     ])
+    return "\n".join(lines)
 
 
 def render_contract_pdf_lines(contract: NegotiatedRateAgreement, session_state: Any = None, outcome: str | None = None) -> list[str]:
@@ -269,6 +396,8 @@ async def generate_contract_details(session_state: Any) -> NegotiatedRateAgreeme
     check_in = getattr(target, "check_in", "N/A")
     check_out = getattr(target, "check_out", "N/A")
     transcript_text = "\n".join(f"{item['role']}: {item['content']}" for item in session_state.transcript)
+    high_level_summary = _report_summary(session_state)
+    summary_hints = _summary_hints(session_state)
     quotes = [
         {
             "nightly_rate": quote.nightly_rate,
@@ -287,11 +416,20 @@ async def generate_contract_details(session_state: Any) -> NegotiatedRateAgreeme
         f"Requested stay: {check_in} to {check_out}",
         f"Requested room type: {room_type}",
         f"Negotiation outcome: {session_state.outcome.value if getattr(session_state, 'outcome', None) else 'N/A'}",
+        f"High-level negotiation summary: {high_level_summary or 'N/A'}",
+        f"Structured hints from summary: {json.dumps(summary_hints)}",
         f"Known quotes JSON: {json.dumps(quotes)}",
         "Negotiation transcript:",
         transcript_text,
     ])
 
+    fallback_rate = session_state.quotes_received[-1].nightly_rate if session_state.quotes_received else summary_hints.get("rate", "N/A")
+    fallback_cancellation = (
+        session_state.quotes_received[-1].cancellation_policy
+        if session_state.quotes_received and session_state.quotes_received[-1].cancellation_policy
+        else summary_hints.get("cancellation_policy", "N/A")
+    )
+    fallback_concessions = summary_hints.get("concessions") or ["None"]
     fallback = {
         "documentTitle": "Corporate Negotiated Rate Agreement - 2026",
         "galileoReferenceId": f"GAL-{uuid4().hex[:4].upper()}-{hotel_id[:3].upper()}",
@@ -306,16 +444,16 @@ async def generate_contract_details(session_state: Any) -> NegotiatedRateAgreeme
         "rateMatrix": [
             {
                 "roomOrFareType": room_type,
-                "negotiatedRateUSD": session_state.quotes_received[-1].nightly_rate if session_state.quotes_received else "N/A",
-                "discountFromBAR": "N/A",
+                "negotiatedRateUSD": fallback_rate,
+                "discountFromBAR": summary_hints.get("discount", "N/A"),
             }
         ],
         "criticalClauses": {
-            "inventoryGuarantee": "NLRA (Non-Last Room Availability)",
+            "inventoryGuarantee": summary_hints.get("inventory_guarantee", "NLRA (Non-Last Room Availability)"),
             "blackoutDates": ["None"],
-            "cancellationPolicy": session_state.quotes_received[-1].cancellation_policy if session_state.quotes_received and session_state.quotes_received[-1].cancellation_policy else "N/A",
+            "cancellationPolicy": fallback_cancellation,
         },
-        "concessions": ["None"],
+        "concessions": fallback_concessions,
         "billingAndSettlement": {"method": "N/A"},
     }
 

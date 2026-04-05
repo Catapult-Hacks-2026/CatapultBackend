@@ -54,6 +54,7 @@ class WorkerSessionState(BaseModel):
     moves_made: list[AgentMove] = Field(default_factory=list)
     transcript: list[dict[str, str]] = Field(default_factory=list)
     behavioral_priors: dict[str, Any] = Field(default_factory=dict)
+    report_summary: str = ""
     next_move: AgentMove | None = None
     error_log: list[str] = Field(default_factory=list)
     outcome: NegotiationOutcome | None = None

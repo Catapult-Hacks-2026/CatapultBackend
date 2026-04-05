@@ -75,6 +75,7 @@ class VoiceContractArtifactTests(unittest.IsolatedAsyncioTestCase):
                                 result = await post_call_node(state)
 
         self.assertEqual(result["outcome"], NegotiationOutcome.RATE_CONFIRMED)
+        self.assertEqual(state.report_summary, "Confirmed rate by phone.")
         self.assertEqual(state.receipt_artifacts.email_sent_to, "agent@example.com")
         send_receipt.assert_awaited_once()
 
@@ -143,6 +144,7 @@ class VoiceContractArtifactTests(unittest.IsolatedAsyncioTestCase):
                                 result = await post_call_node(state)
 
         self.assertEqual(result["outcome"], NegotiationOutcome.FAILED)
+        self.assertEqual(state.report_summary, "Rate was too high to pursue.")
         self.assertEqual(state.receipt_artifacts.email_sent_to, "agent@example.com")
         send_receipt.assert_awaited_once()
 

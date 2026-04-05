@@ -93,6 +93,101 @@ cp .env.example .env   # fill in keys from above
 uvicorn app.main:app --reload --port 8000
 ```
 
+## Email Report Testing
+
+Use this flow to test the human-facing negotiation report email that gets sent after a call summary is generated.
+
+**Step 1 — Start the app on port 8000:**
+
+```bash
+uvicorn app.main:app --reload --port 8000
+```
+
+If `uvicorn` is not on your shell path, use:
+
+```bash
+python -m uvicorn app.main:app --reload --port 8000
+```
+
+**Step 2 — Expose the app with ngrok when you need a public callback URL:**
+
+```bash
+# Install ngrok: https://ngrok.com
+ngrok http 8000
+```
+
+Copy the HTTPS forwarding URL from ngrok, for example:
+
+```text
+https://abc123.ngrok-free.app
+```
+
+Set `BASE_URL=https://abc123.ngrok-free.app` in `.env`, then restart the app if you are testing any inbound webhook or Twilio callback flow.
+
+**Step 3 — Send a demo negotiation report email:**
+
+```bash
+curl -X POST http://127.0.0.1:8000/email/reports/test \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "recipient": "jeffreytseng07@gmail.com",
+    "outcome": "rate_confirmed"
+  }'
+```
+
+This sends the current demo report email plus the attached PDF to `jeffreytseng07@gmail.com`.
+
+**Step 4 — Send a custom report body for testing specific details:**
+
+```bash
+curl -X POST http://127.0.0.1:8000/email/reports/test \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "recipient": "jeffreytseng07@gmail.com",
+    "outcome": "failed",
+    "report": {
+      "documentTitle": "Corporate Negotiated Rate Agreement - 2026",
+      "galileoReferenceId": "GAL-5555-CHI",
+      "parties": {
+        "clientName": "Acme Travel",
+        "vendorName": "Chicago Hotel"
+      },
+      "term": {
+        "startDate": "2026-05-01",
+        "endDate": "2026-05-03"
+      },
+      "rateMatrix": [
+        {
+          "roomOrFareType": "King",
+          "negotiatedRateUSD": 329,
+          "discountFromBAR": "N/A"
+        }
+      ],
+      "criticalClauses": {
+        "inventoryGuarantee": "NLRA (Non-Last Room Availability)",
+        "blackoutDates": ["None"],
+        "cancellationPolicy": "48 hours prior"
+      },
+      "concessions": ["None"],
+      "billingAndSettlement": {
+        "method": "Transient - Employee Corporate Card"
+      }
+    }
+  }'
+```
+
+**Step 5 — Verify the app is up and reachable locally:**
+
+```bash
+curl http://127.0.0.1:8000/
+```
+
+Expected response:
+
+```json
+{"status":"ok"}
+```
+
 ## Testing with a Real Phone Number
 
 Twilio must be able to POST back to your server when a call connects. This requires a public URL — localhost will not work.

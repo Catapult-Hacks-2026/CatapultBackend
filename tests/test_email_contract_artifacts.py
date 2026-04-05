@@ -10,6 +10,7 @@ from app.email.contract_artifacts import (
     build_receipt_email_body,
     build_receipt_email_subject,
     render_contract_pdf_lines,
+    resolve_receipt_recipient,
 )
 from app.email.schemas import EmailSessionState, EmailTarget
 from app.hotel.schemas import HotelQuote
@@ -44,6 +45,42 @@ class EmailContractArtifactTests(unittest.IsolatedAsyncioTestCase):
             build_receipt_email_subject(contract, "rate_confirmed"),
             "Galileo negotiation report | rate_confirmed | GAL-8492-ORD",
         )
+
+    def test_receipt_email_body_uses_report_summary_and_omits_unknown_fields(self) -> None:
+        contract = NegotiatedRateAgreement.model_validate({
+            "documentTitle": "Corporate Negotiated Rate Agreement - 2026",
+            "galileoReferenceId": "GAL-9000-ORD",
+            "parties": {"clientName": "Acme Travel", "vendorName": "Ord Hotel"},
+            "term": {"startDate": "2026-06-01", "endDate": "2026-06-03"},
+            "rateMatrix": [{"roomOrFareType": "King", "negotiatedRateUSD": 205, "discountFromBAR": "N/A"}],
+            "criticalClauses": {
+                "inventoryGuarantee": "NLRA (Non-Last Room Availability)",
+                "blackoutDates": ["None"],
+                "cancellationPolicy": "N/A",
+            },
+            "concessions": ["None"],
+            "billingAndSettlement": {"method": "N/A"},
+        })
+        state = EmailSessionState(
+            session_id="session-summary-email",
+            email_target=EmailTarget(
+                hotel_id="hotel-ord",
+                email_address="sales@example.com",
+                check_in="2026-06-01",
+                check_out="2026-06-03",
+                room_type="King",
+                target_rate=180.0,
+                max_rate=230.0,
+            ),
+            report_summary="Hotel held firm at $205/night and would not add breakfast, so Galileo recommends passing on this option.",
+        )
+
+        body = build_receipt_email_body(contract, session_state=state, outcome="failed")
+
+        self.assertIn("Conversation Summary: Hotel held firm at $205/night and would not add breakfast, so Galileo recommends passing on this option.", body)
+        self.assertNotIn("Cancellation Policy:", body)
+        self.assertNotIn("Billing Method:", body)
+        self.assertNotIn("Concessions:", body)
 
     def test_pdf_lines_include_pricing_rationale_and_notes(self) -> None:
         contract = NegotiatedRateAgreement.model_validate({
@@ -86,6 +123,48 @@ class EmailContractArtifactTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Weather or temperature signal: Warm weather and convention traffic were supporting demand.", joined)
         self.assertIn("Negotiation Notes", joined)
         self.assertIn("Executive Commercial Summary", joined)
+
+    async def test_build_contract_artifacts_uses_summary_when_llm_and_quotes_are_missing(self) -> None:
+        target = EmailTarget(
+            hotel_id="hotel-summary",
+            email_address="sales@example.com",
+            check_in="2026-08-01",
+            check_out="2026-08-03",
+            room_type="Double Queen",
+            target_rate=180.0,
+            max_rate=240.0,
+            campaign_metadata={"client_name": "Acme Travel"},
+        )
+        state = EmailSessionState(
+            session_id="session-summary-fallback",
+            email_target=target,
+            report_summary="Hotel offered $212 per night with breakfast included and 48 hours prior cancellation.",
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch("app.email.contract_artifacts.ARTIFACT_ROOT", Path(temp_dir)):
+                with patch("app.email.contract_artifacts.invoke_json", side_effect=RuntimeError("llm unavailable")):
+                    artifacts = await build_contract_artifacts(state)
+
+        self.assertEqual(artifacts.contract_json["rateMatrix"][0]["negotiatedRateUSD"], 212.0)
+        self.assertEqual(artifacts.contract_json["criticalClauses"]["cancellationPolicy"], "48 hours prior")
+        self.assertIn("Breakfast included", artifacts.contract_json["concessions"])
+
+    def test_resolve_receipt_recipient_defaults_to_demo_email(self) -> None:
+        state = EmailSessionState(
+            session_id="session-summary-fallback",
+            email_target=EmailTarget(
+                hotel_id="hotel-summary",
+                email_address="sales@example.com",
+                check_in="2026-08-01",
+                check_out="2026-08-03",
+                room_type="Double Queen",
+                target_rate=180.0,
+                max_rate=240.0,
+            ),
+        )
+
+        self.assertEqual(resolve_receipt_recipient(state), "jeffreytseng07@gmail.com")
 
     async def test_build_contract_artifacts_writes_json_and_pdf(self) -> None:
         target = EmailTarget(

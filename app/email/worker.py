@@ -235,6 +235,7 @@ class EmailWorkerSession:
             self._state.status = EmailSessionStatus.COMPLETED
 
         analysis = await analyze_email_thread(self._state)
+        self._state.report_summary = analysis.summary
         if self._state.outcome is None:
             self._state.outcome = analysis.outcome
         receipt_recipient = resolve_receipt_recipient(self._state)
