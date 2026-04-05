@@ -32,22 +32,31 @@ class MailgunProvider(EmailProviderAdapter):
             payload["h:Reply-To"] = message.reply_to
         if message.in_reply_to:
             payload["h:In-Reply-To"] = message.in_reply_to
-        if message.references:
-            payload["h:References"] = " ".join(message.references)
+        references = [reference for reference in message.references if reference]
+        if references:
+            payload["h:References"] = " ".join(references)
         for key, value in message.metadata.items():
             payload[f"v:{key}"] = value
+
+        files = [
+            ("attachment", (attachment.filename, attachment.data, attachment.content_type))
+            for attachment in message.attachments
+        ]
 
         response = await get_http_client().post(
             f"https://api.mailgun.net/v3/{domain}/messages",
             auth=("api", settings.email_api_key),
             data=payload,
+            files=files or None,
         )
         response.raise_for_status()
         data = response.json()
+        provider_message_id = data.get("id") or data.get("message-id") or data.get("Message-Id", "")
+        message_id = data.get("Message-Id") or data.get("message-id") or provider_message_id
         return SentEmailReceipt(
             provider=self.provider_name,
-            provider_message_id=data.get("id", ""),
-            message_id=data.get("id", ""),
+            provider_message_id=provider_message_id,
+            message_id=message_id,
             metadata=data,
         )
 

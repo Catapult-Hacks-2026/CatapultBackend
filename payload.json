@@ -1,0 +1,18 @@
+{
+  "campaign_id": "test-campaign",
+  "target": {
+    "channel": "email",
+    "hotel_id": "hotel-ord",
+    "email_address": "tseng94@purdue.edu",
+    "contact_name": "Sales Desk",
+    "check_in": "2026-06-01",
+    "check_out": "2026-06-03",
+    "room_type": "Deluxe King",
+    "target_rate": 180,
+    "max_rate": 230,
+    "campaign_metadata": {
+      "client_name": "Acme Travel",
+      "receipt_email": "tseng94@purdue.edu"
+    }
+  }
+}

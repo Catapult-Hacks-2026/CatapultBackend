@@ -293,6 +293,8 @@ async def monitor_workers_node(state: dict) -> dict:
                 best_quote=best,
                 transcript=result.transcript,
                 moves_made=result.moves_made,
+                contract_details=getattr(result, "contract_details", None),
+                receipt_artifacts=getattr(result, "receipt_artifacts", None),
             )
             if result.outcome == NegotiationOutcome.RATE_CONFIRMED or result.outcome == EmailOutcome.RATE_CONFIRMED:
                 completed_jobs.append(worker_result)
