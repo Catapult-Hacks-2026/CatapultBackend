@@ -1,0 +1,28 @@
+{
+  "documentTitle": "Corporate Negotiated Rate Agreement",
+  "galileoReferenceId": "N/A",
+  "parties": {
+    "clientName": "N/A",
+    "vendorName": "cmp_lumina"
+  },
+  "term": {
+    "startDate": "2026-04-09",
+    "endDate": "2026-04-23"
+  },
+  "rateMatrix": [
+    {
+      "roomOrFareType": "standard",
+      "negotiatedRateUSD": 190.0,
+      "discountFromBAR": "15%"
+    }
+  ],
+  "criticalClauses": {
+    "inventoryGuarantee": "NLRA (Non-Last Room Availability)",
+    "blackoutDates": [],
+    "cancellationPolicy": "N/A"
+  },
+  "concessions": [],
+  "billingAndSettlement": {
+    "method": "N/A"
+  }
+}

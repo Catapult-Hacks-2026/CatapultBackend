@@ -134,6 +134,19 @@ class WorkerSession:
 
     async def _on_session_end(self, state: WorkerSessionState) -> None:
         self._state = state
+        event_id = state.hotel_target.market_context.get("event_id")
+        if isinstance(event_id, str) and event_id:
+            agent_id = _galileo_agent_id(state)
+            if agent_id:
+                try:
+                    from app.galileo.database import promote_next_queued_agent
+                    from app.galileo.router import trigger_twilio_call_for_agent_id
+
+                    promoted_agent = await promote_next_queued_agent(event_id)
+                    if promoted_agent is not None and promoted_agent["id"] != agent_id:
+                        asyncio.create_task(trigger_twilio_call_for_agent_id(promoted_agent["id"]))
+                except Exception:
+                    logger.exception("Failed to start next queued Galileo agent after call end")
         self._pipeline_done.set()
 
     async def _on_transcript_update(self, data: dict[str, Any]) -> None:

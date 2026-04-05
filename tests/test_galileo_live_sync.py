@@ -10,6 +10,7 @@ from app.galileo.database import (
     finalize_agent_run,
     init_galileo_db,
     mark_agent_dialing,
+    promote_next_queued_agent,
     record_agent_quote,
 )
 
@@ -57,6 +58,15 @@ class GalileoLiveSyncTests(unittest.IsolatedAsyncioTestCase):
                     ideal_price, ceiling_price, market_price, current_price, is_accepted
                 )
                 VALUES ('agt_test', 'ent_test', 'evt_test', 'Test Hotel', 'cmp_test', 'Negotiating', 180, 240, 250, 245, 0)
+                """
+            )
+            await conn.execute(
+                """
+                INSERT INTO galileo_agents (
+                    id, enterprise_id, event_id, company_name, company_id, status,
+                    ideal_price, ceiling_price, market_price, current_price, is_accepted
+                )
+                VALUES ('agt_queued', 'ent_test', 'evt_test', 'Queued Hotel', 'cmp_test', 'Queued', 175, 235, 245, 240, 0)
                 """
             )
             await conn.commit()
@@ -107,6 +117,25 @@ class GalileoLiveSyncTests(unittest.IsolatedAsyncioTestCase):
             await cursor.close()
             self.assertEqual(latest_activity["badge"], "Failed")
             self.assertEqual(int(latest_activity["active"]), 1)
+
+    async def test_promote_next_queued_agent_after_completion(self) -> None:
+        await finalize_agent_run("agt_test", "FAILED", best_rate=229.0)
+
+        promoted = await promote_next_queued_agent("evt_test")
+        self.assertIsNotNone(promoted)
+        self.assertEqual(promoted["id"], "agt_queued")
+        self.assertEqual(promoted["status"], "Negotiating")
+
+        async with aiosqlite.connect(str(self.db_path)) as conn:
+            conn.row_factory = aiosqlite.Row
+            cursor = await conn.execute(
+                "SELECT status, outcome, is_accepted FROM galileo_agents WHERE id = 'agt_queued'"
+            )
+            agent = await cursor.fetchone()
+            await cursor.close()
+            self.assertEqual(agent["status"], "Negotiating")
+            self.assertIsNone(agent["outcome"])
+            self.assertEqual(int(agent["is_accepted"]), 0)
 
 
 if __name__ == "__main__":

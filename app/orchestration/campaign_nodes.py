@@ -16,6 +16,7 @@ from app.orchestration.session_lock import get_lock_manager
 logger = logging.getLogger(__name__)
 
 _MAX_RETRIES = 2
+_IDLE_RETRY_DELAY_SECONDS = 2.0
 
 
 def _backend_url(path: str) -> str:
@@ -24,6 +25,20 @@ def _backend_url(path: str) -> str:
 
 def _merge_state(state: dict, updates: dict) -> dict:
     return {**state, **updates}
+
+
+def _hotel_target_from_result(raw_result: Any, result: WorkerSessionState) -> HotelTarget | None:
+    hotel_target = getattr(result, "hotel_target", None)
+    if hotel_target is not None:
+        return hotel_target
+    if isinstance(raw_result, dict):
+        candidate = raw_result.get("hotel_target")
+        if candidate is not None:
+            try:
+                return candidate if isinstance(candidate, HotelTarget) else HotelTarget.model_validate(candidate)
+            except Exception:
+                logger.warning("monitor_workers: failed to parse hotel_target from raw result")
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -199,9 +214,11 @@ async def check_eligibility_node(state: dict) -> dict:
         len(active_workers),
     )
 
+    idle_retry = not eligible and bool(deferred) and not active_workers
     return _merge_state(state, {
         "queued_jobs": eligible,
         "_deferred_jobs": deferred,
+        "_idle_retry": idle_retry,
     })
 
 
@@ -294,6 +311,7 @@ async def monitor_workers_node(state: dict) -> dict:
         else:
             raw_result = task.result()
             result = raw_result if isinstance(raw_result, WorkerSessionState) else WorkerSessionState.model_validate(raw_result)
+            hotel_target = _hotel_target_from_result(raw_result, result)
             logger.info(
                 "monitor_workers: worker finished session_id=%s status=%s outcome=%s call_sid=%s turns=%d quotes=%d",
                 result.session_id,
@@ -314,9 +332,9 @@ async def monitor_workers_node(state: dict) -> dict:
             )
             if result.outcome == NegotiationOutcome.RATE_CONFIRMED:
                 completed_jobs.append(worker_result)
-            elif result.outcome == NegotiationOutcome.CALLBACK_REQUESTED:
+            elif result.outcome == NegotiationOutcome.CALLBACK_REQUESTED and hotel_target is not None:
                 # Put back in retry queue with delay handled by eligibility check
-                retry_queue.append((result.hotel_target, 0))
+                retry_queue.append((hotel_target, 0))
             else:
                 failed_jobs.append(worker_result)
 
@@ -336,6 +354,7 @@ async def handle_outcomes_node(state: dict) -> dict:
     retry_queue: list[tuple[HotelTarget, int]] = list(state.get("retry_queue", []))
     failed_jobs: list[WorkerResult] = list(state.get("failed_jobs", []))
     deferred: list[tuple[float, HotelTarget]] = list(state.get("_deferred_jobs", []))
+    idle_retry = bool(state.get("_idle_retry", False))
 
     promotable: list[tuple[float, HotelTarget]] = []
     exhausted: list[WorkerResult] = []
@@ -355,6 +374,8 @@ async def handle_outcomes_node(state: dict) -> dict:
 
     # Merge deferred back into queue for next cycle
     next_queue = deferred + promotable
+    if idle_retry and next_queue:
+        await asyncio.sleep(_IDLE_RETRY_DELAY_SECONDS)
     logger.debug(
         "handle_outcomes: campaign %s next_queue=%d failed=%d retryable=%d deferred=%d",
         state.get("campaign_id", ""),
@@ -368,6 +389,8 @@ async def handle_outcomes_node(state: dict) -> dict:
         "queued_jobs": next_queue,
         "retry_queue": [],
         "failed_jobs": failed_jobs + exhausted,
+        "_deferred_jobs": [],
+        "_idle_retry": False,
     })
 
 

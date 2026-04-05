@@ -95,6 +95,10 @@ async def _require_agent(agent_id: str) -> dict[str, Any]:
     return agent
 
 
+def _campaign_id_for_agent(event_id: str, agent_id: str) -> str:
+    return f"galileo-{event_id}-{agent_id}"
+
+
 async def _sse_stream(
     request: Request,
     agent_id: str,
@@ -515,8 +519,19 @@ async def _trigger_twilio_call(agent: Agent, event: GalileoEvent) -> None:
 
     settings = get_settings()
     base_url = settings.base_url.rstrip("/")
-    campaign_id = f"galileo-{event.id}"
-    destination_number = "+15152032220"
+    campaign_id = _campaign_id_for_agent(event.id, agent.id)
+    destination_number = (
+        settings.hotel_rep_override_phone_number
+        or settings.galileo_call_phone_number
+        or settings.twilio_to_phone_number
+    )
+
+    if not destination_number:
+        logger.error(
+            "Failed to launch voice campaign for agent %s: no destination number configured",
+            agent.id,
+        )
+        return
 
     target = {
         "hotel_id": agent.companyId,
@@ -531,6 +546,7 @@ async def _trigger_twilio_call(agent: Agent, event: GalileoEvent) -> None:
             "hotel_name": agent.companyName,
             "location": event.location,
             "market": event.location,
+            "event_id": event.id,
             "galileo_agent_id": agent.id,
             "ideal_price": agent.idealPrice,
             "ceiling_price": agent.ceilingPrice,
@@ -553,6 +569,32 @@ async def _trigger_twilio_call(agent: Agent, event: GalileoEvent) -> None:
         logger.info("Launched voice campaign %s for negotiating agent %s", campaign_id, agent.id)
     except Exception as exc:
         logger.error("Failed to launch voice campaign for agent %s: %s", agent.id, exc)
+
+
+async def trigger_twilio_call_for_agent_id(agent_id: str) -> None:
+    agent_payload = await db_get_agent(agent_id)
+    if not agent_payload:
+        logger.warning("Cannot trigger Twilio call for missing Galileo agent %s", agent_id)
+        return
+
+    event_id = agent_payload.get("eventId")
+    if not isinstance(event_id, str) or not event_id:
+        logger.warning("Cannot trigger Twilio call for Galileo agent %s without event id", agent_id)
+        return
+
+    event_payload = await db_get_event(event_id)
+    if not event_payload:
+        logger.warning("Cannot trigger Twilio call for Galileo agent %s without event %s", agent_id, event_id)
+        return
+
+    try:
+        agent = Agent.model_validate(agent_payload)
+        event = GalileoEvent.model_validate(event_payload)
+    except Exception:
+        logger.exception("Failed to validate Galileo payloads before launching agent %s", agent_id)
+        return
+
+    await _trigger_twilio_call(agent, event)
 
 
 @router.post("/market/event-window", response_model=list[EventWindowResult])

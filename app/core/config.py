@@ -18,12 +18,18 @@ class Settings(BaseSettings):
     twilio_phone_number: str = ""
     twilio_to_phone_number: str = ""
     twilio_to_phone_numbers: str = ""
+    hotel_rep_override_phone_number: str = ""
+    galileo_call_phone_number: str = ""
 
     tts_api_key: str = ""
     tts_voice_id: str = ""
     tts_provider: str = "elevenlabs"
     elevenlabs_model_id: str = "eleven_turbo_v2_5"
     cartesia_voice_mode: str = "id"
+    email_api_key: str = ""
+    email_from_address: str = ""
+    email_reply_domain: str = ""
+    email_webhook_secret: str = ""
 
     max_call_duration_seconds: int = 480
     worker_concurrency_limit: int = 5

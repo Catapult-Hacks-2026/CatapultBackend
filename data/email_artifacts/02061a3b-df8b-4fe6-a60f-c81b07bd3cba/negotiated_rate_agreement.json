@@ -1,0 +1,28 @@
+{
+  "documentTitle": "Negotiated Rate Agreement - Failed Negotiation",
+  "galileoReferenceId": "N/A",
+  "parties": {
+    "clientName": "N/A",
+    "vendorName": "cmp_lumina"
+  },
+  "term": {
+    "startDate": "2026-04-10",
+    "endDate": "2026-04-22"
+  },
+  "rateMatrix": [
+    {
+      "roomOrFareType": "standard",
+      "negotiatedRateUSD": 185.0,
+      "discountFromBAR": "15%"
+    }
+  ],
+  "criticalClauses": {
+    "inventoryGuarantee": "NLRA (Non-Last Room Availability)",
+    "blackoutDates": [],
+    "cancellationPolicy": "N/A"
+  },
+  "concessions": [],
+  "billingAndSettlement": {
+    "method": "N/A"
+  }
+}

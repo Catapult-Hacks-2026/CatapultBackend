@@ -460,6 +460,66 @@ async def finalize_agent_run(
         await conn.close()
 
 
+async def promote_next_queued_agent(event_id: str) -> dict[str, Any] | None:
+    conn = await _connect()
+    try:
+        await conn.execute("BEGIN IMMEDIATE")
+        next_agent = await _fetchone(
+            conn,
+            """
+            SELECT id, enterprise_id, event_id, company_name, company_id, status,
+                   outcome, ideal_price, ceiling_price, market_price, current_price, is_accepted
+            FROM galileo_agents
+            WHERE event_id = ? AND status = 'Queued'
+            ORDER BY rowid ASC
+            LIMIT 1
+            """,
+            (event_id,),
+        )
+        if next_agent is None:
+            await conn.rollback()
+            return None
+
+        await conn.execute(
+            """
+            UPDATE galileo_agents
+            SET status = ?, outcome = NULL, is_accepted = 0
+            WHERE id = ?
+            """,
+            (GALILEO_NEGOTIATING_STATUS, next_agent["id"]),
+        )
+        await conn.execute("UPDATE galileo_activity_stream SET active = 0 WHERE agent_id = ?", (next_agent["id"],))
+        await conn.execute(
+            """
+            INSERT INTO galileo_activity_stream (
+                id, agent_id, price, badge, badge_type, detail, detail_type, timestamp, active
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+            """,
+            (
+                str(uuid4()),
+                next_agent["id"],
+                float(next_agent["current_price"] or 0),
+                "Queued",
+                "neutral",
+                "Moved to the front of the queue and preparing outbound call.",
+                "neutral",
+                _now_iso(),
+            ),
+        )
+        await conn.commit()
+        payload = _serialize_agent(next_agent)
+        payload["status"] = GALILEO_NEGOTIATING_STATUS
+        payload["outcome"] = None
+        payload["isAccepted"] = False
+        return payload
+    except Exception:
+        await conn.rollback()
+        raise
+    finally:
+        await conn.close()
+
+
 async def _fetchone(conn: aiosqlite.Connection, query: str, params: tuple[Any, ...] = ()) -> aiosqlite.Row | None:
     cursor = await conn.execute(query, params)
     row = await cursor.fetchone()

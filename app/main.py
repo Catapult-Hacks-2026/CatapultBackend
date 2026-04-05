@@ -11,6 +11,9 @@ from app.galileo.seed import seed_galileo_data
 from app.routers.email import router as email_router
 from app.routers.campaigns import router as campaigns_router
 from app.routers.hotel_data import router as hotel_data_router
+from app.routers.market import router as market_router
+from app.routers.memory import router as memory_router
+from app.routers.sessions import router as sessions_router
 from app.routers.transcript_ws import router as transcript_ws_router
 from app.routers.voice import router as voice_router
 
@@ -70,6 +73,9 @@ app.add_middleware(
 app.include_router(voice_router, prefix="/voice", tags=["voice"])
 app.include_router(email_router, prefix="/email", tags=["email"])
 app.include_router(campaigns_router, prefix="/api", tags=["campaigns"])
+app.include_router(market_router, prefix="/api", tags=["market"])
+app.include_router(memory_router, prefix="/api", tags=["memory"])
+app.include_router(sessions_router, prefix="/api", tags=["sessions"])
 app.include_router(hotel_data_router, prefix="/api/hotel-data", tags=["hotel-data"])
 app.include_router(galileo_router, prefix="/api/galileo", tags=["galileo"])
 app.include_router(transcript_ws_router, prefix="/api/galileo", tags=["transcript"])
