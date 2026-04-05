@@ -38,6 +38,13 @@ _active_workers: dict[str, "WorkerSession"] = {}
 _agent_to_session: dict[str, str] = {}
 
 
+def _galileo_agent_id(state: WorkerSessionState) -> str | None:
+    value = state.hotel_target.market_context.get("galileo_agent_id")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
 class WorkerSession:
     """Wraps a running worker graph instance and its VoicePipeline."""
 
@@ -53,6 +60,19 @@ class WorkerSession:
                 self._state,
                 config={"configurable": {"thread_id": self._state.session_id}},
             )
+            agent_id = _galileo_agent_id(result)
+            if agent_id:
+                try:
+                    from app.galileo.database import finalize_agent_run
+
+                    best_rate = min((q.nightly_rate for q in result.quotes_received), default=None)
+                    await finalize_agent_run(
+                        agent_id,
+                        result.outcome.value if result.outcome else None,
+                        best_rate=best_rate,
+                    )
+                except Exception:
+                    logger.exception("Failed to finalize Galileo agent %s", agent_id)
             return result
         finally:
             unregister_worker(self._state.session_id)
@@ -75,7 +95,14 @@ class WorkerSession:
         return list(self._state.transcript)
 
     async def _on_quote_received(self, quote: Any) -> None:
-        self._state.quotes_received.append(quote)
+        agent_id = _galileo_agent_id(self._state)
+        if agent_id:
+            try:
+                from app.galileo.database import record_agent_quote
+
+                await record_agent_quote(agent_id, quote.nightly_rate, rate_type=quote.rate_type)
+            except Exception:
+                logger.exception("Failed to sync quote to Galileo agent %s", agent_id)
 
     async def _on_session_end(self, state: WorkerSessionState) -> None:
         self._state = state
@@ -94,6 +121,16 @@ class WorkerSession:
             payload=data,
         )
         await get_event_bus().publish(event)
+        if data["type"] == "transcript_final":
+            agent_id = _galileo_agent_id(self._state)
+            if agent_id:
+                try:
+                    from app.galileo.database import append_agent_message
+
+                    sender = "Rep" if data.get("role") == "hotel" else "Galileo"
+                    await append_agent_message(agent_id, str(data.get("content", "")), sender)
+                except Exception:
+                    logger.exception("Failed to sync transcript to Galileo agent %s", agent_id)
 
 
 def build_worker_graph() -> Any:

@@ -24,6 +24,7 @@ httpx==0.27.0
 # Utilities
 python-multipart==0.0.12
 sse-starlette>=1.6.0
+reportlab==4.4.1
 
 # Local voice testing (no Twilio)
 sounddevice>=0.4.6

@@ -1,10 +1,20 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from app.core.config import get_settings
 from app.core.shared_clients import get_http_client
 from app.core.events import EventType, WorkerEvent, get_event_bus
+from app.artifacts.schemas import EmailAttachment
+from app.email.contract_artifacts import (
+    build_contract_artifacts,
+    build_receipt_email_body,
+    build_receipt_email_subject,
+    resolve_receipt_recipient,
+)
+from app.email.mailgun_provider import MailgunProvider
+from app.email.schemas import OutboundEmail
 from app.hotel.enums import NegotiationOutcome, SessionStatus
 from app.hotel.schemas import WorkerSessionState
 from app.orchestration.session_lock import get_lock_manager
@@ -115,6 +125,14 @@ async def start_voice_node(state: WorkerSessionState) -> dict:
             hotel_id=state.hotel_target.hotel_id,
             payload={"call_sid": call.sid},
         ))
+        galileo_agent_id = state.hotel_target.market_context.get("galileo_agent_id")
+        if isinstance(galileo_agent_id, str) and galileo_agent_id.strip():
+            try:
+                from app.galileo.database import mark_agent_dialing
+
+                await mark_agent_dialing(galileo_agent_id, call.sid)
+            except Exception:
+                logger.exception("Failed to sync start state to Galileo agent %s", galileo_agent_id)
         return {"call_sid": call.sid, "status": SessionStatus.RINGING}
     except Exception as exc:
         logger.error("start_voice_node: Twilio call failed: %s", exc)
@@ -310,6 +328,18 @@ async def post_call_node(state: WorkerSessionState) -> dict:
 
     try:
         analysis = await analyze_call(state)
+        state.outcome = analysis.outcome
+        state.report_summary = analysis.summary
+        receipt_recipient = resolve_receipt_recipient(state)
+        if receipt_recipient:
+            try:
+                artifacts = await build_contract_artifacts(state)
+                await _send_voice_receipt_email(state, receipt_recipient, artifacts.pdf_path)
+                if state.receipt_artifacts is not None:
+                    state.receipt_artifacts.email_sent_to = receipt_recipient
+            except Exception as exc:
+                logger.warning("voice receipt send failed for %s: %s", state.session_id, exc)
+                state.error_log.append(f"receipt_send_failed: {exc}")
 
         client = get_http_client()
         await client.patch(_backend_url(f"/api/sessions/{state.session_id}"), json={
@@ -322,6 +352,8 @@ async def post_call_node(state: WorkerSessionState) -> dict:
             "call_quality_score": analysis.call_quality_score,
             "follow_up_recommended": analysis.follow_up_recommended,
             "follow_up_reason": analysis.follow_up_reason,
+            "contract_details": state.contract_details.model_dump() if state.contract_details else None,
+            "receipt_artifacts": state.receipt_artifacts.model_dump() if state.receipt_artifacts else None,
         })
 
         store = get_behavioral_store()
@@ -363,6 +395,54 @@ async def post_call_node(state: WorkerSessionState) -> dict:
             payload={"reason": str(exc)},
         ))
         return {"status": SessionStatus.COMPLETED, "outcome": NegotiationOutcome.FAILED}
+
+
+async def _send_voice_receipt_email(state: WorkerSessionState, recipient: str, pdf_path: str) -> None:
+    if state.contract_details is None:
+        logger.warning("voice_receipt_email: session_id=%s skipped because contract_details is missing", state.session_id)
+        return
+
+    pdf_file = Path(pdf_path)
+    provider = MailgunProvider()
+    outbound = OutboundEmail(
+        to_address=recipient,
+        subject=build_receipt_email_subject(
+            state.contract_details,
+            state.outcome.value if state.outcome else None,
+        ),
+        text=build_receipt_email_body(
+            state.contract_details,
+            session_state=state,
+            outcome=state.outcome.value if state.outcome else None,
+        ),
+        metadata={
+            "session_id": state.session_id,
+            "channel": "voice",
+            "artifact_type": "negotiation_report",
+        },
+        attachments=[
+            EmailAttachment(
+                filename=pdf_file.name,
+                content_type="application/pdf",
+                data=pdf_file.read_bytes(),
+            )
+        ],
+    )
+    logger.info(
+        "voice_receipt_email: session_id=%s recipient=%s subject=%s pdf_path=%s attachments=%d",
+        state.session_id,
+        recipient,
+        outbound.subject,
+        pdf_path,
+        len(outbound.attachments),
+    )
+    receipt = await provider.send_message(outbound)
+    logger.info(
+        "voice_receipt_email: session_id=%s provider=%s provider_message_id=%s",
+        state.session_id,
+        receipt.provider,
+        receipt.provider_message_id,
+    )
 
 
 async def emit_memory_node(state: WorkerSessionState) -> dict:

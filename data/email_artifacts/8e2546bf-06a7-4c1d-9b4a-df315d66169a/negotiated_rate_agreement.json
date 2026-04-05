@@ -1,0 +1,28 @@
+{
+  "documentTitle": "Corporate Negotiated Rate Agreement",
+  "galileoReferenceId": "N/A",
+  "parties": {
+    "clientName": "N/A",
+    "vendorName": "Hilton Hotels"
+  },
+  "term": {
+    "startDate": "2026-04-13",
+    "endDate": "2026-04-17"
+  },
+  "rateMatrix": [
+    {
+      "roomOrFareType": "standard",
+      "negotiatedRateUSD": 230.0,
+      "discountFromBAR": "N/A"
+    }
+  ],
+  "criticalClauses": {
+    "inventoryGuarantee": "NLRA (Non-Last Room Availability)",
+    "blackoutDates": [],
+    "cancellationPolicy": "N/A"
+  },
+  "concessions": [],
+  "billingAndSettlement": {
+    "method": "N/A"
+  }
+}

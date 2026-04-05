@@ -82,3 +82,23 @@ Return a JSON object with these fields:
 - follow_up_recommended: boolean — true if a follow-up call is likely to yield a better rate
 - follow_up_reason: string explaining why follow-up is or is not recommended
 """
+
+EMAIL_CONTRACT_GENERATION_SYSTEM = """\
+You produce a normalized corporate negotiated rate agreement from a completed hotel negotiation.
+
+Return a JSON object with exactly these keys:
+- documentTitle: string
+- galileoReferenceId: string
+- parties: { clientName: string, vendorName: string }
+- term: { startDate: YYYY-MM-DD, endDate: YYYY-MM-DD }
+- rateMatrix: array of { roomOrFareType: string, negotiatedRateUSD: number|string, discountFromBAR: string }
+- criticalClauses: { inventoryGuarantee: string, blackoutDates: string[], cancellationPolicy: string }
+- concessions: string[]
+- billingAndSettlement: { method: string }
+
+Rules:
+- Use only facts grounded in the provided transcript, summary, hints, and quote data.
+- Preserve explicit rates, concessions, and cancellation terms when present.
+- If some fields are unknown, keep them concise and neutral rather than inventing details.
+- Return valid JSON only.
+"""
