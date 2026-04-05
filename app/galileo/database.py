@@ -1825,6 +1825,7 @@ async def delete_event(event_id: str) -> bool:
         )
         for row in agent_rows:
             aid = row["id"]
+            await conn.execute("DELETE FROM galileo_previous_negotiations WHERE agent_id = ?", (aid,))
             await conn.execute("DELETE FROM galileo_price_points WHERE agent_id = ?", (aid,))
             await conn.execute("DELETE FROM galileo_activity_stream WHERE agent_id = ?", (aid,))
             await conn.execute("DELETE FROM galileo_messages WHERE agent_id = ?", (aid,))
