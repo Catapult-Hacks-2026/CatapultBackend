@@ -110,6 +110,12 @@ def _month_number(name: str) -> int:
     return _MONTHS.get(name.strip().lower(), 1)
 
 
+def _is_near_month(record_month: int, target_month: int, window: int = 2) -> bool:
+    """Check if record_month is within +/-window of target_month, wrapping Dec/Jan."""
+    diff = abs(record_month - target_month)
+    return min(diff, 12 - diff) <= window
+
+
 # ─── SQLite → Redis sync ────────────────────────────────────────────
 
 def sync_market_data_to_redis(force: bool = False) -> int:
@@ -211,10 +217,30 @@ def get_market_context(
             f"(avg ${sum(prices)/len(prices):.0f})"
         )
         if check_in_month:
-            seasonal = [p for p in hotel_pricing if p["month"] == check_in_month]
-            if seasonal:
-                avg_seasonal = sum(p["price"] for p in seasonal) / len(seasonal)
-                lines.append(f"  Seasonal avg for month {check_in_month}: ${avg_seasonal:.0f}/night")
+            nearby = [p for p in hotel_pricing if _is_near_month(p["month"], check_in_month)]
+            if nearby:
+                nearby_prices = [p["price"] for p in nearby]
+                avg_nearby = sum(nearby_prices) / len(nearby_prices)
+                # Compute trend: avg of months before check_in vs at/after
+                before = [p["price"] for p in nearby if p["month"] < check_in_month]
+                at_or_after = [p["price"] for p in nearby if p["month"] >= check_in_month]
+                if before and at_or_after:
+                    avg_before = sum(before) / len(before)
+                    avg_after = sum(at_or_after) / len(at_or_after)
+                    diff_pct = (avg_after - avg_before) / avg_before * 100
+                    if diff_pct > 5:
+                        trend = "trending up"
+                    elif diff_pct < -5:
+                        trend = "trending down"
+                    else:
+                        trend = "stable"
+                else:
+                    trend = "stable"
+                lines.append(
+                    f"  Rates near month {check_in_month} (+/-2mo): "
+                    f"${min(nearby_prices):.0f}-${max(nearby_prices):.0f}/night "
+                    f"(avg ${avg_nearby:.0f}), {trend}"
+                )
 
     # 2. This hotel's past negotiation outcomes
     deals_key = f"{_DEALS_PREFIX}:{_normalize(hotel_name)}"
@@ -233,6 +259,12 @@ def get_market_context(
             f"  Latest deal: ${latest['starting_price']:.0f} → ${latest['negotiated_price']:.0f}/night "
             f"({latest['discount_pct']:.0f}% off)"
         )
+        # Discount ceiling from nearby-month negotiations
+        if check_in_month:
+            nearby_deals = [d for d in hotel_deals if _is_near_month(d["month"], check_in_month)]
+            if nearby_deals:
+                best_discount = max(d["discount_pct"] for d in nearby_deals)
+                lines.append(f"  Best seasonal discount: {best_discount:.0f}% — use as target ceiling")
 
     # 3. Competitor pricing in same location
     loc_key = f"{_LOCATION_PRICING}:{_normalize(location)}"

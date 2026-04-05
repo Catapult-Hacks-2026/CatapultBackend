@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 import re
 from collections.abc import Callable, Coroutine
 from typing import Any
@@ -20,6 +21,18 @@ logger = logging.getLogger(__name__)
 
 _MAX_GUARDRAIL_RETRIES = 2
 _FALLBACK_STALL = "Let me check on that for you."
+
+_THINKING_STALLS = [
+    "Let me look into that.",
+    "One moment.",
+    "Let me check our records.",
+    "Let me review that.",
+]
+
+_GREETING_RE = re.compile(
+    r"^(hi|hello|hey|good\s+(morning|afternoon|evening)|how\s+are\s+you|what\s+can\s+i\s+help)",
+    re.IGNORECASE,
+)
 
 # Sentence boundary pattern — flush to TTS at these boundaries for lower latency
 _SENTENCE_END = re.compile(r'(?<=[.!?])\s+')
@@ -104,6 +117,28 @@ class VoicePipeline:
             logger.exception("Fact extraction failed")
             return None
 
+    def _should_stall(self, text: str) -> bool:
+        """Decide whether to play a filler phrase while the brain thinks."""
+        if not self._state.moves_made:
+            return False
+        if len(text.split()) < 4:
+            return False
+        if _GREETING_RE.match(text.strip()):
+            return False
+        return True
+
+    async def _speak_stall(self) -> None:
+        """Speak a brief filler phrase via TTS to fill dead air during thinking."""
+        phrase = random.choice(_THINKING_STALLS)
+        try:
+            await self._tts.connect()
+            await self._tts.send_text_chunk(phrase, flush=True)
+            await self._tts.close_stream()
+            async for audio_chunk in self._tts.receive_audio():
+                await self._bridge.send_audio(audio_chunk)
+        except Exception:
+            logger.debug("Stall phrase failed, continuing silently")
+
     async def _process_utterance(self, text: str, confidence: float) -> None:
         from app.hotel.enums import SessionStatus
 
@@ -111,11 +146,20 @@ class VoicePipeline:
         self._state.status = SessionStatus.ACTIVE
         self._interruption.clear()
 
+        # Speak a stall phrase while the brain thinks (if appropriate)
+        stall_task = None
+        if self._should_stall(text):
+            stall_task = asyncio.create_task(self._speak_stall())
+
         # Fact extraction and move decision run in parallel
         quote, move = await asyncio.gather(
             self._run_fact_extraction(text),
             self._decide_with_guardrails(),
         )
+
+        # Wait for stall to finish before speaking the real response
+        if stall_task is not None:
+            await stall_task
 
         if quote is not None:
             self._state.quotes_received.append(quote)

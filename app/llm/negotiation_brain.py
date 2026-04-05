@@ -70,7 +70,7 @@ async def decide_move(
         )
     data = await invoke_json(
         NEGOTIATION_BRAIN_SYSTEM, context,
-        model="gpt-4o-mini", temperature=0.2, max_tokens=256,
+        model="gpt-4.1-mini", temperature=0.2, max_tokens=512,
     )
 
     move_type = MoveType(data.get("move_type", MoveType.PROBE))
