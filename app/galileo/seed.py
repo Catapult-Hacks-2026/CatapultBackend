@@ -259,7 +259,7 @@ async def seed_galileo_data() -> None:
                 "start_date": "2026-10-07",
                 "end_date": "2026-10-10",
                 "attendees": 260,
-                "service": "Both",
+                "service": "Hotel",
                 "status": "Active",
                 "requirements": "Downtown conference hotel, direct flight inventory, breakfast included.",
                 "budget_per_person": 620.0,
@@ -285,7 +285,7 @@ async def seed_galileo_data() -> None:
                 "start_date": "2025-11-05",
                 "end_date": "2025-11-09",
                 "attendees": 320,
-                "service": "Both",
+                "service": "Hotel",
                 "status": "Completed",
                 "requirements": "Resort venue with breakout rooms and airport transfer package.",
                 "budget_per_person": 710.0,
@@ -311,7 +311,7 @@ async def seed_galileo_data() -> None:
                 "start_date": "2025-05-20",
                 "end_date": "2025-05-24",
                 "attendees": 480,
-                "service": "Both",
+                "service": "Hotel",
                 "status": "Completed",
                 "requirements": "Moscone-adjacent hotel blocks and preferred transcon fares.",
                 "budget_per_person": 845.0,
@@ -415,31 +415,23 @@ async def seed_galileo_data() -> None:
         await conn.executemany(
             """
             INSERT OR IGNORE INTO galileo_agents (
-                id, enterprise_id, event_id, company_id, company_name, segment, type, status,
-                lifecycle_status, outcome, ideal_price, ceiling_price, original_price, current_price,
-                delta, potential_savings, savings_to_date, distance_to_goal, is_accepted
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                id, enterprise_id, event_id, company_name, company_id, status,
+                outcome, ideal_price, ceiling_price, market_price, current_price, is_accepted
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 (
                     a["id"],
                     a["enterprise_id"],
                     a["event_id"],
-                    a["company_id"],
                     a["company_name"],
-                    a["segment"],
-                    a["type"],
+                    a["company_id"],
                     a["status"],
-                    a["lifecycle_status"],
                     a["outcome"],
                     a["ideal_price"],
                     a["ceiling_price"],
                     a["original_price"],
                     a["current_price"],
-                    a["delta"],
-                    a["potential_savings"],
-                    a["savings_to_date"],
-                    a["distance_to_goal"],
                     a["is_accepted"],
                 )
                 for a in agents

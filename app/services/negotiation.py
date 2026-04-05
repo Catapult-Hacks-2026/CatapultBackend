@@ -1,10 +1,16 @@
-import json
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC
 
 from fastapi import HTTPException
 
 from app.core.database import get_db
+from app.core.negotiation_store import (
+    NEGOTIATION_ENTERPRISE_ID,
+    NEGOTIATION_EVENT_ID,
+    ensure_negotiation_scaffold,
+    ensure_vendor_company,
+    negotiation_select,
+)
 from app.models.enums import MessageRole, NegotiationStatus
 from app.models.schemas import AgentAction, BuyerConfig, VendorOffer
 from app.services.guardrails import validate_agent_action
@@ -30,8 +36,11 @@ def _parse_json_blob(payload: str | None) -> dict | list | None:
 def _load_negotiation(negotiation_id: str):
     conn = get_db()
     row = conn.execute(
-        "SELECT * FROM negotiations WHERE id = ?",
-        (negotiation_id,),
+        f"""
+        {negotiation_select()}
+        WHERE ga.id = ? AND ga.enterprise_id = ? AND ga.event_id = ?
+        """,
+        (negotiation_id, NEGOTIATION_ENTERPRISE_ID, NEGOTIATION_EVENT_ID),
     ).fetchone()
     if row is None:
         conn.close()
@@ -53,34 +62,37 @@ def create_negotiation_record(
 ):
     negotiation_id = str(uuid.uuid4())
     conn = get_db()
+    ensure_negotiation_scaffold(conn)
+    company_id = ensure_vendor_company(conn, vendor_name)
+    ideal_price = float(config.target_unit_price)
+    ceiling_price = float(config.max_unit_price)
     conn.execute(
         """
-        INSERT INTO negotiations (
-            id,
-            vendor_name,
-            product_category,
-            status,
-            strategy,
-            config,
-            round_number,
-            max_rounds,
-            updated_at
+        INSERT INTO galileo_agents (
+            id, enterprise_id, event_id, company_name, company_id, status, outcome,
+            ideal_price, ceiling_price, market_price, current_price, is_accepted
         )
-        VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, 0, 0, 0)
         """,
         (
             negotiation_id,
+            NEGOTIATION_ENTERPRISE_ID,
+            NEGOTIATION_EVENT_ID,
             vendor_name,
-            product_category,
+            company_id,
             NegotiationStatus.PENDING.value,
-            strategy,
-            config.model_dump_json(),
-            max_rounds,
-            datetime.now(UTC).isoformat(),
+            ideal_price,
+            ceiling_price,
         ),
     )
     conn.commit()
-    row = conn.execute("SELECT * FROM negotiations WHERE id = ?", (negotiation_id,)).fetchone()
+    row = conn.execute(
+        f"""
+        {negotiation_select()}
+        WHERE ga.id = ? AND ga.enterprise_id = ? AND ga.event_id = ?
+        """,
+        (negotiation_id, NEGOTIATION_ENTERPRISE_ID, NEGOTIATION_EVENT_ID),
+    ).fetchone()
     conn.close()
     return row
 
@@ -150,22 +162,24 @@ def _persist_turn(
             json.dumps(guardrail_result.model_dump()),
         ),
     )
-    current_offer = action.counter_offer or vendor_offer
     conn.execute(
         """
-        UPDATE negotiations
-        SET round_number = round_number + 1,
-            current_offer = ?,
-            utility_score = ?,
-            status = ?,
-            updated_at = ?
+        UPDATE galileo_agents
+        SET status = ?,
+            outcome = ?,
+            current_price = ?,
+            is_accepted = ?
         WHERE id = ?
         """,
         (
-            json.dumps(current_offer.model_dump()),
-            breakdown.total_utility,
             status,
-            datetime.now(UTC).isoformat(),
+            status if status in {
+                NegotiationStatus.ACCEPTED.value,
+                NegotiationStatus.REJECTED.value,
+                NegotiationStatus.ESCALATED.value,
+            } else None,
+            (action.counter_offer or vendor_offer).unit_price,
+            1 if status == NegotiationStatus.ACCEPTED.value else 0,
             negotiation_id,
         ),
     )
@@ -181,15 +195,18 @@ def _persist_turn(
             (negotiation_id,),
         ).fetchall()
         negotiation = conn.execute(
-            "SELECT * FROM negotiations WHERE id = ?",
-            (negotiation_id,),
+            f"""
+            {negotiation_select()}
+            WHERE ga.id = ? AND ga.enterprise_id = ? AND ga.event_id = ?
+            """,
+            (negotiation_id, NEGOTIATION_ENTERPRISE_ID, NEGOTIATION_EVENT_ID),
         ).fetchone()
         add_negotiation_to_history(
             negotiation_id=negotiation_id,
             vendor_name=negotiation["vendor_name"],
             product_category=negotiation["product_category"],
             messages=[_serialize_message(row) for row in rows],
-            final_offer=current_offer,
+            final_offer=action.counter_offer or vendor_offer,
             outcome=status,
         )
     conn.close()
@@ -205,18 +222,21 @@ def _load_competing_offers(
     conn = get_db()
     rows = conn.execute(
         """
-        SELECT vendor_name, current_offer, utility_score, round_number, updated_at
-        FROM negotiations
+        SELECT
+            ga.company_name AS vendor_name,
+            ga.current_price
+        FROM galileo_agents ga
         WHERE id != ?
-          AND product_category = ?
-          AND current_offer IS NOT NULL
-          AND status NOT IN (?, ?, ?)
-        ORDER BY utility_score DESC, updated_at DESC
+          AND ga.enterprise_id = ?
+          AND ga.event_id = ?
+          AND ga.status NOT IN (?, ?, ?)
+        ORDER BY ga.current_price ASC, ga.id DESC
         LIMIT ?
         """,
         (
             negotiation_id,
-            product_category,
+            NEGOTIATION_ENTERPRISE_ID,
+            NEGOTIATION_EVENT_ID,
             NegotiationStatus.ACCEPTED.value,
             NegotiationStatus.REJECTED.value,
             NegotiationStatus.ESCALATED.value,
@@ -227,16 +247,13 @@ def _load_competing_offers(
 
     offers = []
     for row in rows:
-        offer = _parse_json_blob(row["current_offer"])
-        if not isinstance(offer, dict):
-            continue
         offers.append(
             {
                 "vendor_name": row["vendor_name"],
-                "offer": offer,
-                "utility_score": row["utility_score"],
-                "round_number": row["round_number"],
-                "updated_at": row["updated_at"],
+                "offer": {"unit_price": row["current_price"]},
+                "utility_score": None,
+                "round_number": 0,
+                "updated_at": None,
             }
         )
     return offers

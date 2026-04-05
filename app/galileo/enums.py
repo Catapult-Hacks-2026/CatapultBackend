@@ -30,8 +30,6 @@ class AgentStatus(str, Enum):
 
 class ServiceType(str, Enum):
     HOTEL = "Hotel"
-    AIRLINE = "Airline"
-    BOTH = "Both"
 
 
 class EventStatus(str, Enum):

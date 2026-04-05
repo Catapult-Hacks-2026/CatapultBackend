@@ -10,9 +10,7 @@ from app.galileo.router import router as galileo_router
 from app.galileo.seed import seed_galileo_data
 from app.routers.campaigns import router as campaigns_router
 from app.routers.hotel_data import router as hotel_data_router
-from app.routers.negotiations import router as negotiations_router
 from app.routers.voice import router as voice_router
-from app.routers.webhooks import router as webhooks_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -50,8 +48,8 @@ manager = ConnectionManager()
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    init_db()
     await init_galileo_db()
+    init_db()
     await seed_galileo_data()
     # Campaign graph is built on demand per campaign via POST /campaigns/{id}/start
     yield
@@ -67,8 +65,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-app.include_router(negotiations_router, prefix="/negotiations", tags=["negotiations"])
-app.include_router(webhooks_router, prefix="/webhooks", tags=["webhooks"])
 app.include_router(voice_router, prefix="/voice", tags=["voice"])
 app.include_router(campaigns_router, prefix="/api", tags=["campaigns"])
 app.include_router(hotel_data_router, prefix="/api/hotel-data", tags=["hotel-data"])

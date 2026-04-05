@@ -35,12 +35,42 @@ class DatabaseTests(unittest.TestCase):
         conn = sqlite3.connect(self.db_path)
         conn.execute(
             """
-            CREATE TABLE negotiations (
+            CREATE TABLE galileo_enterprises (
                 id TEXT PRIMARY KEY,
-                vendor_name TEXT NOT NULL,
+                name TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE galileo_companies (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE galileo_events (
+                id TEXT PRIMARY KEY,
+                enterprise_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                service TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE galileo_agents (
+                id TEXT PRIMARY KEY,
+                enterprise_id TEXT NOT NULL,
+                event_id TEXT NOT NULL,
+                company_id TEXT NOT NULL,
+                company_name TEXT,
+                segment TEXT,
+                type TEXT NOT NULL,
                 status TEXT NOT NULL DEFAULT 'pending',
-                strategy TEXT NOT NULL DEFAULT 'balanced',
-                config JSON NOT NULL
+                lifecycle_status TEXT NOT NULL DEFAULT 'INITIALIZING'
             )
             """
         )
@@ -61,7 +91,7 @@ class DatabaseTests(unittest.TestCase):
         try:
             columns = {
                 row["name"]
-                for row in conn.execute("PRAGMA table_info(negotiations)").fetchall()
+                for row in conn.execute("PRAGMA table_info(galileo_agents)").fetchall()
             }
             tables = {
                 row["name"]
@@ -77,6 +107,7 @@ class DatabaseTests(unittest.TestCase):
         self.assertIn("messages", tables)
         self.assertIn("latest_quotes", tables)
         self.assertIn("session_locks", tables)
+        self.assertNotIn("negotiations", tables)
 
     def test_get_redis_builds_and_caches_client(self) -> None:
         sentinel = object()

@@ -1,6 +1,7 @@
 from fastapi import APIRouter, BackgroundTasks, HTTPException
 
 from app.core.database import get_db
+from app.core.negotiation_store import NEGOTIATION_SEGMENT, negotiation_select
 from app.models.enums import NegotiationStatus, Strategy
 from app.models.schemas import BuyerConfig, CreateNegotiationRequest, InboundVendorMessage
 from app.services.negotiation import create_negotiation_record, process_vendor_input
@@ -43,13 +44,20 @@ async def simulate_vendor_message(payload: dict, background_tasks: BackgroundTas
 
     conn = get_db()
     negotiation = conn.execute(
-        """
-        SELECT * FROM negotiations
-        WHERE vendor_name = ? AND status NOT IN (?, ?)
-        ORDER BY updated_at DESC
+        f"""
+        {negotiation_select()}
+        WHERE ga.company_name = ?
+          AND ga.segment = ?
+          AND ga.status NOT IN (?, ?)
+        ORDER BY ga.updated_at DESC
         LIMIT 1
         """,
-        (vendor_name, NegotiationStatus.ACCEPTED.value, NegotiationStatus.ESCALATED.value),
+        (
+            vendor_name,
+            NEGOTIATION_SEGMENT,
+            NegotiationStatus.ACCEPTED.value,
+            NegotiationStatus.ESCALATED.value,
+        ),
     ).fetchone()
     conn.close()
 

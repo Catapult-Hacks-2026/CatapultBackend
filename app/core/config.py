@@ -1,11 +1,14 @@
 from functools import lru_cache
 
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
+    anthropic_api_key: str = ""
     openai_api_key: str = ""
     openai_model: str = "gpt-4o"
+    negotiation_model: str = "claude-3-5-sonnet-latest"
+    research_model: str = ""
 
     assemblyai_api_key: str = ""
     assemblyai_end_utterance_silence_ms: int = 700
@@ -13,11 +16,14 @@ class Settings(BaseSettings):
     twilio_account_sid: str = ""
     twilio_auth_token: str = ""
     twilio_phone_number: str = ""
+    twilio_to_phone_number: str = ""
+    twilio_to_phone_numbers: str = ""
 
     tts_api_key: str = ""
     tts_voice_id: str = ""
     tts_provider: str = "elevenlabs"
     elevenlabs_model_id: str = "eleven_turbo_v2_5"
+    cartesia_voice_mode: str = "id"
 
     max_call_duration_seconds: int = 480
     worker_concurrency_limit: int = 5
@@ -29,8 +35,7 @@ class Settings(BaseSettings):
 
     base_url: str = "http://localhost:8000"
 
-    class Config:
-        env_file = ".env"
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 
 @lru_cache()

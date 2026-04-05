@@ -8,6 +8,7 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException, WebSocket, WebSoc
 from pydantic import BaseModel
 
 from app.core.database import get_db
+from app.core.negotiation_store import NEGOTIATION_SEGMENT, lifecycle_status_for, negotiation_select
 from app.models.enums import MessageRole, NegotiationStatus, Strategy
 from app.models.schemas import (
     BatchNegotiationRequest,
@@ -393,7 +394,12 @@ def import_market_data(payload: ImportMarketDataRequest) -> dict:
 def list_negotiations() -> list[NegotiationResponse]:
     conn = get_db()
     rows = conn.execute(
-        "SELECT * FROM negotiations ORDER BY updated_at DESC, created_at DESC"
+        f"""
+        {negotiation_select()}
+        WHERE ga.segment = ?
+        ORDER BY ga.updated_at DESC, ga.created_at DESC
+        """,
+        (NEGOTIATION_SEGMENT,),
     ).fetchall()
     conn.close()
     return [_serialize_negotiation(row) for row in rows]
@@ -405,7 +411,13 @@ def get_negotiation(negotiation_id: str) -> dict:
         return _preview_negotiation_payload()
 
     conn = get_db()
-    row = conn.execute("SELECT * FROM negotiations WHERE id = ?", (negotiation_id,)).fetchone()
+    row = conn.execute(
+        f"""
+        {negotiation_select()}
+        WHERE ga.id = ? AND ga.segment = ?
+        """,
+        (negotiation_id, NEGOTIATION_SEGMENT),
+    ).fetchone()
     if row is None:
         conn.close()
         raise HTTPException(status_code=404, detail="Negotiation not found")
@@ -479,7 +491,13 @@ def get_scoring(negotiation_id: str) -> dict:
         }
 
     conn = get_db()
-    row = conn.execute("SELECT * FROM negotiations WHERE id = ?", (negotiation_id,)).fetchone()
+    row = conn.execute(
+        f"""
+        {negotiation_select()}
+        WHERE ga.id = ? AND ga.segment = ?
+        """,
+        (negotiation_id, NEGOTIATION_SEGMENT),
+    ).fetchone()
     conn.close()
     if row is None:
         raise HTTPException(status_code=404, detail="Negotiation not found")
@@ -500,7 +518,13 @@ def get_scoring(negotiation_id: str) -> dict:
 @router.patch("/{negotiation_id}")
 def update_negotiation(negotiation_id: str, payload: dict) -> dict:
     conn = get_db()
-    row = conn.execute("SELECT * FROM negotiations WHERE id = ?", (negotiation_id,)).fetchone()
+    row = conn.execute(
+        f"""
+        {negotiation_select()}
+        WHERE ga.id = ? AND ga.segment = ?
+        """,
+        (negotiation_id, NEGOTIATION_SEGMENT),
+    ).fetchone()
     if row is None:
         conn.close()
         raise HTTPException(status_code=404, detail="Negotiation not found")
@@ -512,11 +536,17 @@ def update_negotiation(negotiation_id: str, payload: dict) -> dict:
         strategy = strategy.value
 
     conn.execute(
-        "UPDATE negotiations SET strategy = ?, config = ?, updated_at = ? WHERE id = ?",
+        "UPDATE galileo_agents SET strategy = ?, config = ?, updated_at = ? WHERE id = ?",
         (strategy, config.model_dump_json(), datetime.now(UTC).isoformat(), negotiation_id),
     )
     conn.commit()
-    updated = conn.execute("SELECT * FROM negotiations WHERE id = ?", (negotiation_id,)).fetchone()
+    updated = conn.execute(
+        f"""
+        {negotiation_select()}
+        WHERE ga.id = ? AND ga.segment = ?
+        """,
+        (negotiation_id, NEGOTIATION_SEGMENT),
+    ).fetchone()
     conn.close()
     return _serialize_negotiation(updated).model_dump()
 
@@ -524,13 +554,25 @@ def update_negotiation(negotiation_id: str, payload: dict) -> dict:
 @router.post("/{negotiation_id}/approve")
 def approve_negotiation(negotiation_id: str) -> dict:
     conn = get_db()
-    row = conn.execute("SELECT * FROM negotiations WHERE id = ?", (negotiation_id,)).fetchone()
+    row = conn.execute(
+        f"""
+        {negotiation_select()}
+        WHERE ga.id = ? AND ga.segment = ?
+        """,
+        (negotiation_id, NEGOTIATION_SEGMENT),
+    ).fetchone()
     if row is None:
         conn.close()
         raise HTTPException(status_code=404, detail="Negotiation not found")
     conn.execute(
-        "UPDATE negotiations SET status = ?, updated_at = ? WHERE id = ?",
-        (NegotiationStatus.ACCEPTED.value, datetime.now(UTC).isoformat(), negotiation_id),
+        "UPDATE galileo_agents SET status = ?, lifecycle_status = ?, outcome = ?, is_accepted = 1, updated_at = ? WHERE id = ?",
+        (
+            NegotiationStatus.ACCEPTED.value,
+            lifecycle_status_for(NegotiationStatus.ACCEPTED.value),
+            NegotiationStatus.ACCEPTED.value,
+            datetime.now(UTC).isoformat(),
+            negotiation_id,
+        ),
     )
     conn.execute(
         """
@@ -553,13 +595,22 @@ def approve_negotiation(negotiation_id: str) -> dict:
 @router.post("/{negotiation_id}/escalate")
 def escalate_negotiation(negotiation_id: str) -> dict:
     conn = get_db()
-    exists = conn.execute("SELECT 1 FROM negotiations WHERE id = ?", (negotiation_id,)).fetchone()
+    exists = conn.execute(
+        "SELECT 1 FROM galileo_agents WHERE id = ? AND segment = ?",
+        (negotiation_id, NEGOTIATION_SEGMENT),
+    ).fetchone()
     if exists is None:
         conn.close()
         raise HTTPException(status_code=404, detail="Negotiation not found")
     conn.execute(
-        "UPDATE negotiations SET status = ?, updated_at = ? WHERE id = ?",
-        (NegotiationStatus.ESCALATED.value, datetime.now(UTC).isoformat(), negotiation_id),
+        "UPDATE galileo_agents SET status = ?, lifecycle_status = ?, outcome = ?, updated_at = ? WHERE id = ?",
+        (
+            NegotiationStatus.ESCALATED.value,
+            lifecycle_status_for(NegotiationStatus.ESCALATED.value),
+            NegotiationStatus.ESCALATED.value,
+            datetime.now(UTC).isoformat(),
+            negotiation_id,
+        ),
     )
     conn.execute(
         """

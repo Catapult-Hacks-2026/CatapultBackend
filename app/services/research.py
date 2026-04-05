@@ -3,6 +3,7 @@ from datetime import UTC, datetime
 
 from app.core.config import get_settings
 from app.core.database import get_db
+from app.core.negotiation_store import NEGOTIATION_ENTERPRISE_ID, NEGOTIATION_EVENT_ID, negotiation_select
 from app.models.schemas import BuyerConfig
 from app.services.llm import Anthropic, invoke_json
 from app.services.rag import retrieve_competitor_context, retrieve_vendor_context
@@ -63,8 +64,11 @@ def _fallback_brief(negotiation: dict, config: BuyerConfig, vendor_history: list
 def generate_negotiation_brief(negotiation_id: str) -> dict:
     conn = get_db()
     row = conn.execute(
-        "SELECT id, vendor_name, product_category, config, research_brief FROM negotiations WHERE id = ?",
-        (negotiation_id,),
+        f"""
+        {negotiation_select()}
+        WHERE ga.id = ? AND ga.enterprise_id = ? AND ga.event_id = ?
+        """,
+        (negotiation_id, NEGOTIATION_ENTERPRISE_ID, NEGOTIATION_EVENT_ID),
     ).fetchone()
     conn.close()
     if row is None:
@@ -116,11 +120,4 @@ def generate_negotiation_brief(negotiation_id: str) -> dict:
         brief.setdefault("generated_at", datetime.now(UTC).isoformat())
         brief.setdefault("source", settings.research_model or settings.negotiation_model)
 
-    conn = get_db()
-    conn.execute(
-        "UPDATE negotiations SET research_brief = ?, updated_at = ? WHERE id = ?",
-        (json.dumps(brief), datetime.now(UTC).isoformat(), negotiation_id),
-    )
-    conn.commit()
-    conn.close()
     return brief

@@ -2,8 +2,8 @@ fastapi==0.115.0
 uvicorn[standard]==0.30.0
 websockets==13.0
 python-dotenv==1.0.1
-pydantic==2.9.0
-pydantic-settings==2.5.0
+pydantic==2.12.0
+pydantic-settings==2.12.0
 
 # Database
 aiosqlite==0.20.0
@@ -12,7 +12,7 @@ aiosqlite==0.20.0
 openai>=1.40.0
 redis>=5.0.0
 chromadb==0.5.0  # kept for one-time migration of legacy data to Redis
-numpy==2.0.2
+numpy==2.4.3
 langgraph>=0.2.0
 langchain-openai>=0.2.0
 

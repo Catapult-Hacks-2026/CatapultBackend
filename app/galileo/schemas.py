@@ -4,15 +4,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.galileo.enums import (
-    AgentLifecycleStatus,
-    AgentStatus,
-    BookingWindowStatus,
-    EventStatus,
-    NegotiationOutcome,
-    PricePointType,
-    ServiceType,
-)
+from app.galileo.enums import BookingWindowStatus, EventStatus, PricePointType, ServiceType
 
 
 class GalileoBaseModel(BaseModel):
@@ -35,19 +27,19 @@ class Location(GalileoBaseModel):
     id: str
     companyId: str
     name: str
-    address: str
-    phone: str
+    address: str | None = None
+    phone: str | None = None
 
 
 class Company(GalileoBaseModel):
     id: str
     name: str
-    initials: str
-    description: str
-    phone: str
-    website: str
-    industry: str
-    badge: str
+    initials: str | None = None
+    description: str | None = None
+    phone: str | None = None
+    website: str | None = None
+    industry: str | None = None
+    badge: str | None = None
     locations: list[Location] = Field(default_factory=list)
 
 
@@ -96,24 +88,13 @@ class Agent(GalileoBaseModel):
     eventId: str
     companyId: str
     companyName: str
-    segment: str
-    type: ServiceType
-    status: AgentStatus
-    lifecycleStatus: AgentLifecycleStatus
-    outcome: NegotiationOutcome | None = None
+    status: str
+    outcome: str | None = None
     idealPrice: float
     ceilingPrice: float
-    originalPrice: float
+    marketPrice: float
     currentPrice: float
-    delta: float
-    potentialSavings: float
-    savingsToDate: float
-    distanceToGoal: float
     isAccepted: bool
-    pricePath: list[PricePoint] = Field(default_factory=list)
-    activityStream: list[ActivityStreamItem] = Field(default_factory=list)
-    transcript: list[Message] = Field(default_factory=list)
-    previousNegotiations: list[PreviousNegotiation] = Field(default_factory=list)
 
 
 class GalileoEvent(GalileoBaseModel):
@@ -182,7 +163,6 @@ class MarketPricingRequest(GalileoBaseModel):
 class MarketPricingResult(GalileoBaseModel):
     service: ServiceType
     hotel: MarketPriceBand | None = None
-    airline: MarketPriceBand | None = None
 
 
 class EventWindowPricing(GalileoBaseModel):
@@ -206,7 +186,6 @@ class EventWindowResult(GalileoBaseModel):
     endDate: str
     explanation: str
     hotel: EventWindowPricing | None = None
-    airline: EventWindowPricing | None = None
     negotiationConfidence: float
 
 
@@ -221,7 +200,6 @@ class ServiceGuardrail(GalileoBaseModel):
 
 class LaunchGuardrails(GalileoBaseModel):
     hotel: ServiceGuardrail | None = None
-    airline: ServiceGuardrail | None = None
 
 
 class LaunchNegotiationRequest(GalileoBaseModel):

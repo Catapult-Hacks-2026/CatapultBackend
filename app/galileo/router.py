@@ -238,26 +238,18 @@ async def transcript_stream(agent_id: str, request: Request) -> EventSourceRespo
 @router.post("/market/pricing", response_model=MarketPricingResult)
 async def get_market_pricing(payload: MarketPricingRequest) -> MarketPricingResult:
     duration_days = _days_between(payload.startDate, payload.endDate)
-    hotel_market, airline_market = _pricing_baseline(payload.location, payload.attendees, duration_days)
+    hotel_market, _airline_market = _pricing_baseline(payload.location, payload.attendees, duration_days)
 
     hotel = {
         "marketPrice": hotel_market,
         "predictedWinPrice": round(hotel_market * 0.9, 2),
         "unit": "per night",
     }
-    airline = {
-        "marketPrice": airline_market,
-        "predictedWinPrice": round(airline_market * 0.88, 2),
-        "unit": "per seat",
-    }
 
-    service = payload.service.value
-    normalized = service.strip().lower()
     return MarketPricingResult.model_validate(
         {
-            "service": service,
-            "hotel": hotel if normalized in {"hotel", "both"} else None,
-            "airline": airline if normalized in {"airline", "both"} else None,
+            "service": "Hotel",
+            "hotel": hotel,
         }
     )
 
@@ -289,17 +281,14 @@ async def find_event_window(payload: EventWindowRequest) -> list[EventWindowResu
     for label, shift_days, confidence, discount, explanation in windows:
         start = base_start + timedelta(days=shift_days)
         end = start + timedelta(days=max(payload.nights, 1))
-        hotel_market, airline_market = _pricing_baseline(
+        hotel_market, _airline_market = _pricing_baseline(
             payload.location,
             payload.attendees,
             max(payload.nights, 1),
         )
         room_nights = max(payload.nights, 1) * max(payload.attendees, 1)
-        seats = max(payload.attendees, 1)
         hotel_market_cost = round(hotel_market * room_nights, 2)
-        airline_market_cost = round(airline_market * seats, 2)
         hotel_negotiated = round(hotel_market_cost * discount, 2)
-        airline_negotiated = round(airline_market_cost * (discount - 0.02), 2)
 
         event_window = {
             "label": label,
@@ -310,11 +299,6 @@ async def find_event_window(payload: EventWindowRequest) -> list[EventWindowResu
                 "marketCost": hotel_market_cost,
                 "negotiatedPrice": hotel_negotiated,
                 "savings": round(hotel_market_cost - hotel_negotiated, 2),
-            },
-            "airline": {
-                "marketCost": airline_market_cost,
-                "negotiatedPrice": airline_negotiated,
-                "savings": round(airline_market_cost - airline_negotiated, 2),
             },
             "negotiationConfidence": round(confidence, 2),
         }

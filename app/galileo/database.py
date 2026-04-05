@@ -166,19 +166,12 @@ def _serialize_agent(
         "eventId": row["event_id"],
         "companyId": row["company_id"],
         "companyName": row["company_name"],
-        "segment": row["segment"],
-        "type": row["type"],
         "status": row["status"],
-        "lifecycleStatus": row["lifecycle_status"],
         "outcome": row["outcome"],
         "idealPrice": float(row["ideal_price"] or 0),
         "ceilingPrice": float(row["ceiling_price"] or 0),
-        "originalPrice": float(row["original_price"] or 0),
+        "marketPrice": float(row["market_price"] or 0),
         "currentPrice": float(row["current_price"] or 0),
-        "delta": float(row["delta"] or 0),
-        "potentialSavings": float(row["potential_savings"] or 0),
-        "savingsToDate": float(row["savings_to_date"] or 0),
-        "distanceToGoal": float(row["distance_to_goal"] or 0),
         "isAccepted": bool(row["is_accepted"]),
     }
     payload["pricePath"] = price_path or []
@@ -288,25 +281,15 @@ def _company_matches_service(company_row: aiosqlite.Row, service_type: str) -> b
             str(company_row["description"] or ""),
         ]
     ).lower()
-    if normalized == "hotel":
-        return "hotel" in searchable or "hospitality" in searchable or "resort" in searchable
-    if normalized == "airline":
-        return "airline" in searchable or "aviation" in searchable or "airways" in searchable
-    return True
+    return "hotel" in searchable or "hospitality" in searchable or "resort" in searchable
 
 
 def _required_service_types(service: str) -> list[str]:
-    normalized = (service or "").strip().lower()
-    if normalized == "both":
-        return ["Hotel", "Airline"]
-    if normalized == "airline":
-        return ["Airline"]
     return ["Hotel"]
 
 
 def _is_event_complete(event_service: str, accepted_types: set[str]) -> bool:
-    required = {value.lower() for value in _required_service_types(event_service)}
-    return required.issubset({value.lower() for value in accepted_types})
+    return "hotel" in {value.lower() for value in accepted_types}
 
 
 async def init_galileo_db() -> None:
@@ -363,21 +346,14 @@ async def init_galileo_db() -> None:
                 id TEXT PRIMARY KEY,
                 enterprise_id TEXT NOT NULL,
                 event_id TEXT NOT NULL REFERENCES galileo_events(id),
-                company_id TEXT NOT NULL REFERENCES galileo_companies(id),
                 company_name TEXT,
-                segment TEXT,
-                type TEXT NOT NULL,
+                company_id TEXT NOT NULL REFERENCES galileo_companies(id),
                 status TEXT NOT NULL DEFAULT 'Queued',
-                lifecycle_status TEXT NOT NULL DEFAULT 'INITIALIZING',
                 outcome TEXT,
                 ideal_price REAL,
                 ceiling_price REAL,
-                original_price REAL,
+                market_price REAL,
                 current_price REAL,
-                delta REAL,
-                potential_savings REAL,
-                savings_to_date REAL,
-                distance_to_goal REAL,
                 is_accepted INTEGER DEFAULT 0
             );
 
@@ -432,8 +408,8 @@ async def init_galileo_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_galileo_agents_company_status
             ON galileo_agents (company_id, status, is_accepted);
 
-            CREATE INDEX IF NOT EXISTS idx_galileo_agents_event_type
-            ON galileo_agents (event_id, type);
+            CREATE INDEX IF NOT EXISTS idx_galileo_agents_event
+            ON galileo_agents (event_id);
 
             CREATE INDEX IF NOT EXISTS idx_galileo_locations_company
             ON galileo_locations (company_id);
@@ -450,6 +426,10 @@ async def init_galileo_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_galileo_prev_negotiations_agent
             ON galileo_previous_negotiations (agent_id, start_date);
             """
+        )
+        # Normalize all service values to 'Hotel'
+        await conn.execute(
+            "UPDATE galileo_events SET service = 'Hotel' WHERE service != 'Hotel'"
         )
         await conn.commit()
     finally:
@@ -482,9 +462,8 @@ async def get_agents(
 ) -> list[dict[str, Any]]:
     limit_value = max(1, min(limit or 50, 500))
     query = """
-        SELECT id, enterprise_id, event_id, company_id, company_name, segment, type, status, lifecycle_status,
-               outcome, ideal_price, ceiling_price, original_price, current_price, delta, potential_savings,
-               savings_to_date, distance_to_goal, is_accepted
+        SELECT id, enterprise_id, event_id, company_name, company_id, status,
+               outcome, ideal_price, ceiling_price, market_price, current_price, is_accepted
         FROM galileo_agents
         WHERE enterprise_id = ?
     """
@@ -512,9 +491,8 @@ async def get_agent(agent_id: str) -> dict[str, Any] | None:
         row = await _fetchone(
             conn,
             """
-            SELECT id, enterprise_id, event_id, company_id, company_name, segment, type, status, lifecycle_status,
-                   outcome, ideal_price, ceiling_price, original_price, current_price, delta, potential_savings,
-                   savings_to_date, distance_to_goal, is_accepted
+            SELECT id, enterprise_id, event_id, company_name, company_id, status,
+                   outcome, ideal_price, ceiling_price, market_price, current_price, is_accepted
             FROM galileo_agents
             WHERE id = ?
             """,
@@ -557,9 +535,8 @@ async def get_events(enterprise_id: str, status: str | None = None) -> list[dict
         agent_rows = await _fetchall(
             conn,
             f"""
-            SELECT id, enterprise_id, event_id, company_id, company_name, segment, type, status, lifecycle_status,
-                   outcome, ideal_price, ceiling_price, original_price, current_price, delta, potential_savings,
-                   savings_to_date, distance_to_goal, is_accepted
+            SELECT id, enterprise_id, event_id, company_name, company_id, status,
+                   outcome, ideal_price, ceiling_price, market_price, current_price, is_accepted
             FROM galileo_agents
             WHERE event_id IN ({placeholders})
             ORDER BY rowid DESC
@@ -596,9 +573,8 @@ async def get_event(event_id: str) -> dict[str, Any] | None:
         agent_rows = await _fetchall(
             conn,
             """
-            SELECT id, enterprise_id, event_id, company_id, company_name, segment, type, status, lifecycle_status,
-                   outcome, ideal_price, ceiling_price, original_price, current_price, delta, potential_savings,
-                   savings_to_date, distance_to_goal, is_accepted
+            SELECT id, enterprise_id, event_id, company_name, company_id, status,
+                   outcome, ideal_price, ceiling_price, market_price, current_price, is_accepted
             FROM galileo_agents
             WHERE event_id = ?
             ORDER BY rowid DESC
@@ -720,13 +696,10 @@ async def get_enterprise_company_view(
         query = """
             SELECT a.id AS agent_id,
                    a.event_id,
-                   a.type,
                    a.status,
-                   a.delta,
-                   a.original_price,
+                   a.ideal_price,
+                   a.market_price,
                    a.current_price,
-                   a.potential_savings,
-                   a.savings_to_date,
                    a.is_accepted,
                    e.name AS event_name,
                    e.location AS event_location,
@@ -781,10 +754,23 @@ async def get_enterprise_company_view(
             }
 
         accepted_rows = [row for row in linked_rows if row["is_accepted"]]
-        deltas = [float(row["delta"] or 0) for row in linked_rows]
-        total_savings = sum(float(row["savings_to_date"] or 0) for row in linked_rows)
-        lifetime_savings = sum(float(row["savings_to_date"] or row["potential_savings"] or 0) for row in linked_rows)
-        potential_savings = sum(float(row["potential_savings"] or 0) for row in linked_rows)
+        deltas = [
+            (((float(row["market_price"] or 0) - float(row["current_price"] or 0)) / float(row["market_price"] or 1)) * 100)
+            if float(row["market_price"] or 0) > 0 else 0.0
+            for row in linked_rows
+        ]
+        total_savings = sum(
+            max(0.0, float(row["market_price"] or 0) - float(row["current_price"] or 0))
+            for row in accepted_rows
+        )
+        lifetime_savings = sum(
+            max(0.0, float(row["market_price"] or 0) - float(row["current_price"] or 0))
+            for row in linked_rows
+        )
+        potential_savings = sum(
+            max(0.0, float(row["market_price"] or 0) - float(row["ideal_price"] or 0))
+            for row in linked_rows
+        )
         total_bookings = len({row["event_id"] for row in linked_rows})
         agreements_count = len(accepted_rows)
 
@@ -805,9 +791,9 @@ async def get_enterprise_company_view(
                 if len(start_date) >= 4 and start_date[:4].isdigit():
                     year = int(start_date[:4])
             if year == current_year:
-                current_year_savings += float(row["savings_to_date"] or 0)
+                current_year_savings += max(0.0, float(row["market_price"] or 0) - float(row["current_price"] or 0))
             elif year == (current_year - 1):
-                previous_year_savings += float(row["savings_to_date"] or 0)
+                previous_year_savings += max(0.0, float(row["market_price"] or 0) - float(row["current_price"] or 0))
         if previous_year_savings > 0:
             yoy_change = ((current_year_savings - previous_year_savings) / previous_year_savings) * 100
         elif current_year_savings > 0:
@@ -840,7 +826,7 @@ async def get_enterprise_company_view(
                 },
             )
             bucket["negotiated"].append(float(row["current_price"] or 0))
-            bucket["market"].append(float(row["original_price"] or 0))
+            bucket["market"].append(float(row["market_price"] or 0))
 
         pricing_trends_all: list[dict[str, Any]] = []
         pricing_trends_1y: list[dict[str, Any]] = []
@@ -892,9 +878,8 @@ async def get_enterprise_company_view(
         agent_rows = await _fetchall(
             conn,
             f"""
-            SELECT id, enterprise_id, event_id, company_id, company_name, segment, type, status, lifecycle_status,
-                   outcome, ideal_price, ceiling_price, original_price, current_price, delta, potential_savings,
-                   savings_to_date, distance_to_goal, is_accepted
+            SELECT id, enterprise_id, event_id, company_name, company_id, status,
+                   outcome, ideal_price, ceiling_price, market_price, current_price, is_accepted
             FROM galileo_agents
             WHERE event_id IN ({event_placeholders})
             ORDER BY rowid DESC
@@ -936,8 +921,7 @@ async def accept_offer(event_id: str, agent_id: str, enterprise_id: str) -> dict
         target = await _fetchone(
             conn,
             """
-            SELECT id, enterprise_id, event_id, type, is_accepted, status, savings_to_date, potential_savings,
-                   original_price, current_price
+            SELECT id, enterprise_id, event_id, is_accepted, status, market_price, current_price
             FROM galileo_agents
             WHERE id = ? AND event_id = ? AND enterprise_id = ?
             """,
@@ -948,121 +932,71 @@ async def accept_offer(event_id: str, agent_id: str, enterprise_id: str) -> dict
             return None
 
         if not bool(target["is_accepted"]):
-            savings_increment = float(target["savings_to_date"] or 0)
-            if savings_increment <= 0:
-                savings_increment = float(target["potential_savings"] or 0)
-            if savings_increment <= 0:
-                original_price = float(target["original_price"] or 0)
-                current_price = float(target["current_price"] or 0)
-                savings_increment = max(0.0, original_price - current_price)
+            savings_increment = max(0.0, float(target["market_price"] or 0) - float(target["current_price"] or 0))
 
             await conn.execute(
                 """
                 UPDATE galileo_agents
                 SET is_accepted = 1,
                     status = 'Completed',
-                    lifecycle_status = 'COMPLETED',
-                    outcome = COALESCE(outcome, 'RATE_CONFIRMED'),
-                    savings_to_date = CASE
-                        WHEN savings_to_date IS NULL OR savings_to_date = 0 THEN ?
-                        ELSE savings_to_date
-                    END
+                    outcome = COALESCE(outcome, 'RATE_CONFIRMED')
                 WHERE id = ?
                 """,
-                (savings_increment, agent_id),
+                (agent_id,),
             )
-
-            # Find any previously accepted agent of the same type to reverse its totals
             prev_accepted = await _fetchone(
                 conn,
                 """
-                SELECT id, savings_to_date, potential_savings, original_price, current_price
+                SELECT id, market_price, current_price
                 FROM galileo_agents
                 WHERE event_id = ?
                   AND id <> ?
-                  AND lower(type) = lower(?)
                   AND is_accepted = 1
                 """,
-                (event_id, agent_id, target["type"]),
+                (event_id, agent_id),
             )
             prev_savings = 0.0
             if prev_accepted:
-                prev_savings = float(prev_accepted["savings_to_date"] or 0)
-                if prev_savings <= 0:
-                    prev_savings = float(prev_accepted["potential_savings"] or 0)
-                if prev_savings <= 0:
-                    prev_orig = float(prev_accepted["original_price"] or 0)
-                    prev_curr = float(prev_accepted["current_price"] or 0)
-                    prev_savings = max(0.0, prev_orig - prev_curr)
+                prev_savings = max(
+                    0.0,
+                    float(prev_accepted["market_price"] or 0) - float(prev_accepted["current_price"] or 0),
+                )
 
             await conn.execute(
                 """
                 UPDATE galileo_agents
                 SET is_accepted = 0,
                     status = 'Cancelled',
-                    lifecycle_status = CASE
-                        WHEN lifecycle_status = 'COMPLETED' THEN lifecycle_status
-                        ELSE 'FAILED'
-                    END,
                     outcome = CASE
                         WHEN outcome IS NULL THEN 'TIMED_OUT'
                         ELSE outcome
                     END
                 WHERE event_id = ?
                   AND id <> ?
-                  AND lower(type) = lower(?)
                 """,
-                (event_id, agent_id, target["type"]),
+                (event_id, agent_id),
             )
 
-            type_lower = str(target["type"] or "").strip().lower()
             net_savings = savings_increment - prev_savings
-            hotels_delta = net_savings if type_lower == "hotel" else 0.0
-            airlines_delta = net_savings if type_lower == "airline" else 0.0
-            hotel_count_delta = (1 if type_lower == "hotel" else 0) - (1 if prev_accepted and type_lower == "hotel" else 0)
-            airline_count_delta = (1 if type_lower == "airline" else 0) - (1 if prev_accepted and type_lower == "airline" else 0)
 
             await conn.execute(
                 """
                 UPDATE galileo_enterprises
                 SET total_saved = COALESCE(total_saved, 0) + ?,
                     total_saved_hotels = COALESCE(total_saved_hotels, 0) + ?,
-                    total_saved_airlines = COALESCE(total_saved_airlines, 0) + ?,
-                    hotel_contract_count = COALESCE(hotel_contract_count, 0) + ?,
-                    airline_contract_count = COALESCE(airline_contract_count, 0) + ?
+                    hotel_contract_count = COALESCE(hotel_contract_count, 0) + ?
                 WHERE id = ?
                 """,
-                (net_savings, hotels_delta, airlines_delta, hotel_count_delta, airline_count_delta, enterprise_id),
+                (net_savings, net_savings, 1, enterprise_id),
             )
-
-        accepted_type_rows = await _fetchall(
-            conn,
+        await conn.execute(
             """
-            SELECT DISTINCT type
-            FROM galileo_agents
-            WHERE event_id = ? AND is_accepted = 1
-            """,
-            (event_id,),
-        )
-        accepted_types = {str(row["type"]) for row in accepted_type_rows if row["type"] is not None}
-        event_row = await _fetchone(
-            conn,
-            """
-            SELECT service
-            FROM galileo_events
+            UPDATE galileo_events
+            SET status = 'Completed'
             WHERE id = ?
             """,
             (event_id,),
         )
-        if event_row is not None and _is_event_complete(str(event_row["service"] or ""), accepted_types):
-            await conn.execute(
-                """
-                UPDATE galileo_events
-                SET status = 'Completed'
-                WHERE id = ?
-                """,
-                (event_id,),
-            )
 
         await conn.commit()
     except Exception:
@@ -1088,7 +1022,8 @@ async def create_event_with_agents(launch_request: Any) -> dict[str, Any] | None
         return None
 
     event_id = str(uuid4())
-    service = str(_get_value(payload, "service", default="Hotel"))
+    raw_service = _get_value(payload, "service", default="Hotel")
+    service = raw_service.value if hasattr(raw_service, "value") else str(raw_service)
     event_name = str(_get_value(payload, "eventName", "event_name", default="New Galileo Event"))
     event_location = _get_value(payload, "location", default="")
     start_date = _get_value(payload, "startDate", "start_date")
@@ -1179,41 +1114,28 @@ async def create_event_with_agents(launch_request: Any) -> dict[str, Any] | None
                 minimum, maximum = _price_range_for_service(service_type)
                 original_price = round(random.uniform(max(ideal_price, minimum), max(ceiling_price, maximum)), 2)
                 current_price = round(original_price * random.uniform(0.92, 0.99), 2)
-                savings = max(0.0, original_price - current_price)
-                delta = round(((current_price - original_price) / original_price) * 100, 2) if original_price else 0.0
-                distance_to_goal = max(0.0, current_price - ideal_price)
-
                 agent_status = GALILEO_NEGOTIATING_STATUS if idx == 0 else "Queued"
-                lifecycle_status = "ACTIVE" if idx == 0 else "INITIALIZING"
 
                 agent_id = str(uuid4())
                 await conn.execute(
                     """
                     INSERT INTO galileo_agents (
-                        id, enterprise_id, event_id, company_id, company_name, segment, type, status,
-                        lifecycle_status, outcome, ideal_price, ceiling_price, original_price, current_price,
-                        delta, potential_savings, savings_to_date, distance_to_goal, is_accepted
+                        id, enterprise_id, event_id, company_name, company_id, status, outcome,
+                        ideal_price, ceiling_price, market_price, current_price, is_accepted
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                    VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, 0)
                     """,
                     (
                         agent_id,
                         enterprise_id,
                         event_id,
-                        company["id"],
                         company["name"],
-                        "Enterprise",
-                        service_type,
+                        company["id"],
                         agent_status,
-                        lifecycle_status,
                         ideal_price,
                         ceiling_price,
                         original_price,
                         current_price,
-                        delta,
-                        max(0.0, original_price - ideal_price),
-                        savings if agent_status == GALILEO_NEGOTIATING_STATUS else 0.0,
-                        distance_to_goal,
                     ),
                 )
 
@@ -1288,7 +1210,6 @@ async def intervene_agent(agent_id: str) -> dict[str, Any] | None:
             """
             UPDATE galileo_agents
             SET status = 'Reviewing',
-                lifecycle_status = 'WRAPPING_UP',
                 outcome = CASE
                     WHEN outcome IS NULL THEN 'ESCALATED_TO_HUMAN'
                     ELSE outcome

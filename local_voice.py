@@ -81,6 +81,9 @@ async def main(args: argparse.Namespace) -> None:
 
     # Seed market data into DB + Redis so the brain has RAG context
     from app.core.database import init_db
+    from app.galileo.database import init_galileo_db
+
+    await init_galileo_db()
     init_db()
 
     print(f"\nSession {session.session_id}")

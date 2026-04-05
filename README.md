@@ -88,6 +88,7 @@ Where to get each key:
 ## Prerequisites
 
 - Python 3.11+
+- If you are using Python 3.14, install from the current `requirements.txt`; older NumPy pins such as `2.0.x` do not build cleanly there on macOS arm64
 - [Redis](https://redis.io/docs/getting-started/) running locally (used for session locking and coordination)
 
 ## Getting Started
