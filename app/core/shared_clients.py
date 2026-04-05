@@ -16,6 +16,7 @@ def get_http_client() -> httpx.AsyncClient:
         _http_client = httpx.AsyncClient(
             limits=httpx.Limits(max_connections=50, max_keepalive_connections=20),
             timeout=httpx.Timeout(10.0, connect=5.0),
+            headers={"ngrok-skip-browser-warning": "true"},
         )
     return _http_client
 

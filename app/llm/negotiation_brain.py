@@ -13,6 +13,41 @@ from app.llm.prompts import NEGOTIATION_BRAIN_SYSTEM, RESPONSE_GENERATION_SYSTEM
 logger = logging.getLogger(__name__)
 
 
+def _get_galileo_past_deals(location: str) -> str:
+    """Pull past accepted deals from the galileo DB for use in negotiation context."""
+    from app.core.database import get_db
+
+    try:
+        conn = get_db()
+        rows = conn.execute(
+            """
+            SELECT e.location, e.start_date, e.attendees,
+                   a.company_name, a.market_price, a.current_price
+            FROM galileo_events e
+            JOIN galileo_agents a ON a.event_id = e.id
+            WHERE e.status = 'Completed' AND a.is_accepted = 1
+            ORDER BY e.start_date DESC
+            LIMIT 10
+            """,
+        ).fetchall()
+        conn.close()
+    except Exception:
+        return ""
+
+    if not rows:
+        return ""
+
+    lines = ["Past accepted deals from our portfolio:"]
+    for r in rows:
+        discount = round((1 - r["current_price"] / r["market_price"]) * 100, 1) if r["market_price"] else 0
+        lines.append(
+            f"  {r['company_name']} in {r['location']} ({r['start_date']}): "
+            f"market ${r['market_price']:.0f} → accepted ${r['current_price']:.0f}/night "
+            f"({discount}% discount, {r['attendees']} attendees)"
+        )
+    return "\n".join(lines)
+
+
 def _build_brain_context(session_state: WorkerSessionState) -> str:
     target = session_state.hotel_target
     hotel_name = target.market_context.get("hotel_name", target.hotel_id)
@@ -67,6 +102,11 @@ def _build_brain_context(session_state: WorkerSessionState) -> str:
     market_brief = priors.get("market_brief")
     if market_brief:
         lines.append(f"\n{market_brief}")
+
+    # Past galileo negotiations (accepted deals from the DB)
+    galileo_brief = _get_galileo_past_deals(location)
+    if galileo_brief:
+        lines.append(f"\n{galileo_brief}")
 
     transcript_lines = session_state.transcript[-6:] if len(session_state.transcript) >= 6 else session_state.transcript
     lines.append("\nRecent conversation:")

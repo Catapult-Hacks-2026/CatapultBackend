@@ -71,12 +71,13 @@ class VoicePipeline:
         await self._done.wait()
         inbound.cancel()
         monitor.cancel()
-        await self._stt.close()
-        await self._tts.close()
+   
         if self._on_transcript_update:
             await self._on_transcript_update({"type": "call_ended"})
         if self._on_session_end:
             await self._on_session_end(self._state)
+        await self._stt.close()
+        await self._tts.close()
 
     async def _inbound_loop(self) -> None:
         while not self._done.is_set():
