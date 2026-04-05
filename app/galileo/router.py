@@ -272,37 +272,53 @@ async def launch_negotiations(payload: LaunchNegotiationRequest) -> GalileoEvent
     # Trigger Twilio call for the agent marked as Negotiating
     for agent in event.agents:
         if agent.status == "Negotiating":
-            asyncio.create_task(_trigger_twilio_call(agent.id))
+            asyncio.create_task(_trigger_twilio_call(agent, event))
             break
 
     return event
 
 
-async def _trigger_twilio_call(agent_id: str) -> None:
-    """Place an outbound Twilio call for a negotiating agent."""
-    settings = get_settings()
-    destination_number = "2609998910"
-    try:
-        from twilio.rest import Client as TwilioClient
+async def _trigger_twilio_call(agent: Agent, event: GalileoEvent) -> None:
+    """Launch a voice campaign using the same API path as launch_voice_campaign.py."""
+    import httpx
 
-        client = TwilioClient(settings.twilio_account_sid, settings.twilio_auth_token)
-        twiml_url = f"{settings.base_url}/voice/twilio-stream/{agent_id}"
-        status_callback_url = f"{settings.base_url}/voice/status/{agent_id}"
-        call = client.calls.create(
-            to=f"+1{destination_number}",
-            from_=settings.twilio_phone_number,
-            url=twiml_url,
-            status_callback=status_callback_url,
-            status_callback_event=["initiated", "ringing", "answered", "completed"],
-            status_callback_method="POST",
-        )
-        logger.info(
-            "Twilio call triggered for negotiating agent %s: call_sid=%s",
-            agent_id,
-            call.sid,
-        )
+    settings = get_settings()
+    base_url = settings.base_url.rstrip("/")
+    campaign_id = f"galileo-{event.id}"
+    destination_number = "+12609998910"
+
+    target = {
+        "hotel_id": agent.companyId,
+        "phone_number": destination_number,
+        "check_in": event.startDate,
+        "check_out": event.endDate,
+        "room_type": "standard",
+        "target_rate": agent.idealPrice,
+        "max_rate": agent.ceilingPrice,
+        "priority_score": 1.0,
+        "market_context": {
+            "hotel_name": agent.companyName,
+            "location": event.location,
+            "market": event.location,
+        },
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            store_resp = await client.put(
+                f"{base_url}/api/campaigns/{campaign_id}/targets",
+                json={"targets": [target]},
+            )
+            store_resp.raise_for_status()
+
+            start_resp = await client.post(
+                f"{base_url}/api/campaigns/{campaign_id}/start",
+            )
+            start_resp.raise_for_status()
+
+        logger.info("Launched voice campaign %s for negotiating agent %s", campaign_id, agent.id)
     except Exception as exc:
-        logger.error("Failed to trigger Twilio call for agent %s: %s", agent_id, exc)
+        logger.error("Failed to launch voice campaign for agent %s: %s", agent.id, exc)
 
 
 @router.post("/market/event-window", response_model=list[EventWindowResult])
