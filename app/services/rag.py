@@ -221,10 +221,9 @@ def migrate_from_chroma(chroma_dir: str = "data/chroma") -> int:
 
     try:
         import chromadb
-    except ImportError:
+    except (ImportError, Exception) as exc:
         logger.warning(
-            "migrate_from_chroma: chromadb not installed, cannot migrate legacy data. "
-            "Install chromadb or run `python -m app.seed` to re-seed."
+            "migrate_from_chroma: chromadb unavailable (%s), skipping legacy migration.", exc
         )
         return 0
 

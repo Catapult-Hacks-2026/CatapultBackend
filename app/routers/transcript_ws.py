@@ -51,11 +51,17 @@ async def transcript_ws(websocket: WebSocket, agent_id: str, last_index: int = -
 
     # Subscribe to transcript events for this session
     queue = get_event_bus().subscribe(
-        event_types={EventType.TRANSCRIPT_PARTIAL, EventType.TRANSCRIPT_FINAL, EventType.CALL_ENDED},
+        event_types={
+            EventType.TRANSCRIPT_PARTIAL,
+            EventType.TRANSCRIPT_FINAL,
+            EventType.CALL_ENDED,
+            EventType.PRICE_CHANGED,
+            EventType.DEAL_FINALIZED,
+        },
     )
 
     try:
-        await _pump(websocket, queue, session_id)
+        await _pump(websocket, queue, session_id, agent_id)
     except WebSocketDisconnect:
         logger.info("Transcript WS disconnected for agent %s", agent_id)
     except Exception:
@@ -68,6 +74,7 @@ async def _pump(
     websocket: WebSocket,
     queue: asyncio.Queue,
     session_id: str,
+    agent_id: str = "",
 ) -> None:
     receive_task = asyncio.create_task(websocket.receive_text())
     queue_task = asyncio.create_task(queue.get())
@@ -94,12 +101,18 @@ async def _pump(
 
             if queue_task in done:
                 event = queue_task.result()
-                # Only forward events for this session
-                if event.session_id != session_id:
+                # Forward events that match this session or this agent
+                is_session_match = event.session_id == session_id
+                is_agent_match = (
+                    event.event_type in (EventType.PRICE_CHANGED, EventType.DEAL_FINALIZED)
+                    and event.payload.get("galileo_agent_id") == agent_id
+                )
+                if not is_session_match and not is_agent_match:
                     queue_task = asyncio.create_task(queue.get())
                     continue
 
                 payload = dict(event.payload)
+                payload["type"] = event.event_type.value
                 payload["session_id"] = session_id
                 payload["timestamp"] = datetime.now(timezone.utc).isoformat()
                 await websocket.send_json(payload)

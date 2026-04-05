@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Any
+
 import httpx
-import openai
 
 from app.core.config import get_settings
 
+if TYPE_CHECKING:
+    import openai
+
 _http_client: httpx.AsyncClient | None = None
-_openai_client: openai.AsyncOpenAI | None = None
+_openai_client: Any | None = None
 
 
 def get_http_client() -> httpx.AsyncClient:
@@ -16,14 +20,17 @@ def get_http_client() -> httpx.AsyncClient:
         _http_client = httpx.AsyncClient(
             limits=httpx.Limits(max_connections=50, max_keepalive_connections=20),
             timeout=httpx.Timeout(10.0, connect=5.0),
+            headers={"ngrok-skip-browser-warning": "true"},
         )
     return _http_client
 
 
-def get_openai_client() -> openai.AsyncOpenAI:
+def get_openai_client() -> "openai.AsyncOpenAI":
     """Shared AsyncOpenAI client across all workers."""
     global _openai_client
     if _openai_client is None:
+        import openai
+
         _openai_client = openai.AsyncOpenAI(api_key=get_settings().openai_api_key)
     return _openai_client
 

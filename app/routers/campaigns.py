@@ -18,6 +18,11 @@ _campaign_targets: dict[str, list[HotelTarget]] = {}
 _campaign_summaries: dict[str, dict] = {}
 
 
+def get_campaign_targets_local(campaign_id: str) -> list[HotelTarget]:
+    """Direct access to stored targets without HTTP round-trip."""
+    return list(_campaign_targets.get(campaign_id, []))
+
+
 class StartCampaignRequest(BaseModel):
     campaign_id: str
 

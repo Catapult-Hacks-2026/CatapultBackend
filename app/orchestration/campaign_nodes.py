@@ -33,21 +33,15 @@ def _merge_state(state: dict, updates: dict) -> dict:
 async def ingest_targets_node(state: dict) -> dict:
     campaign_id = state["campaign_id"]
     logger.info("ingest_targets: loading targets for campaign %s", campaign_id)
-    client = get_http_client()
-    try:
-        resp = await client.get(_backend_url(f"/api/campaigns/{campaign_id}/targets"))
-        raw = resp.json() if resp.status_code == 200 else []
-    except Exception as exc:
-        logger.error("ingest_targets: fetch failed: %s", exc)
-        raw = []
+
+    # Read directly from the in-process store instead of HTTP round-trip
+    # through ngrok, which is unreliable on free-tier tunnels.
+    from app.routers.campaigns import get_campaign_targets_local
+    targets = get_campaign_targets_local(campaign_id)
 
     target_jobs: dict[str, HotelTarget] = {}
-    for item in raw:
-        try:
-            t = HotelTarget(**item)
-            target_jobs[t.hotel_id] = t
-        except Exception:
-            logger.warning("ingest_targets: skipping malformed target: %s", item)
+    for t in targets:
+        target_jobs[t.hotel_id] = t
 
     existing: dict[str, HotelTarget] = state.get("target_jobs", {})
     existing.update(target_jobs)

@@ -63,6 +63,7 @@ class VoicePipeline:
         self._tts = ElevenLabsStreamingTTS()
         self._done = asyncio.Event()
         self._processing_lock = asyncio.Lock()
+        self._pending_hangup_mark: str | None = None
 
     async def start(self) -> None:
         await self._stt.connect()
@@ -71,12 +72,23 @@ class VoicePipeline:
         await self._done.wait()
         inbound.cancel()
         monitor.cancel()
-        await self._stt.close()
-        await self._tts.close()
+
+        # If no outcome was set by a terminating move, derive it from state
+        if self._state.outcome is None:
+            from app.hotel.enums import NegotiationOutcome
+            self._state.outcome = self._derive_outcome()
+
         if self._on_transcript_update:
-            await self._on_transcript_update({"type": "call_ended"})
+            best_rate = min((q.nightly_rate for q in self._state.quotes_received), default=None)
+            await self._on_transcript_update({
+                "type": "call_ended",
+                "outcome": str(self._state.outcome),
+                "final_price": best_rate,
+            })
         if self._on_session_end:
             await self._on_session_end(self._state)
+        await self._stt.close()
+        await self._tts.close()
 
     async def _inbound_loop(self) -> None:
         while not self._done.is_set():
@@ -87,6 +99,11 @@ class VoicePipeline:
                     audio = event.get("_audio_bytes", b"")
                     if audio:
                         await self._stt.send_audio(audio)
+                elif event_type == "mark":
+                    mark_name = event.get("mark", {}).get("name", "")
+                    if mark_name == self._pending_hangup_mark:
+                        logger.info("Hangup mark received, ending call")
+                        self._done.set()
                 elif event_type == "stop":
                     logger.info("Twilio stream stopped")
                     self._done.set()
@@ -98,11 +115,23 @@ class VoicePipeline:
         settings = get_settings()
         max_duration = settings.max_call_duration_seconds
         start = asyncio.get_event_loop().time()
+        hangup_mark_at: float | None = None
         while not self._done.is_set():
-            await asyncio.sleep(10)
-            if asyncio.get_event_loop().time() - start > max_duration:
+            await asyncio.sleep(1)
+            now = asyncio.get_event_loop().time()
+            if now - start > max_duration:
                 logger.warning("Session %s exceeded max duration", self._state.session_id)
                 self._done.set()
+                break
+            # Safety timeout: if we sent a hangup mark but never got the
+            # callback, force-terminate after 10 seconds.
+            if self._pending_hangup_mark is not None:
+                if hangup_mark_at is None:
+                    hangup_mark_at = now
+                elif now - hangup_mark_at > 10:
+                    logger.warning("Hangup mark timeout, forcing termination")
+                    self._done.set()
+                    break
 
     async def _on_partial_transcript(self, text: str) -> None:
         # Feed partial transcripts to interruption detector while agent is speaking
@@ -175,13 +204,13 @@ class VoicePipeline:
             await stall_task
 
         if quote is not None:
-            self._state.quotes_received.append(quote)
             if self._on_quote_received:
                 await self._on_quote_received(quote)
 
         response_text = await self._speak(move)
         move.response_text = response_text
         self._state.moves_made.append(move)
+        self._state.next_move = move
         self._state.transcript.append({"role": "agent", "content": response_text})
         if self._on_transcript_update:
             await self._on_transcript_update({
@@ -191,8 +220,56 @@ class VoicePipeline:
                 "index": len(self._state.transcript) - 1,
             })
 
+        # Record Galileo counter-offers as price changes
+        if move.counter_rate and move.counter_rate > 0:
+            galileo_agent_id = self._state.hotel_target.market_context.get("galileo_agent_id")
+            if galileo_agent_id:
+                try:
+                    from app.galileo.database import record_price_change
+                    await record_price_change(
+                        agent_id=galileo_agent_id,
+                        price=move.counter_rate,
+                        source="galileo",
+                    )
+                    if self._on_transcript_update:
+                        await self._on_transcript_update({
+                            "type": "price_changed",
+                            "galileo_agent_id": galileo_agent_id,
+                            "price": move.counter_rate,
+                            "source": "galileo",
+                        })
+                except Exception:
+                    logger.warning("Failed to record galileo counter for agent %s", galileo_agent_id)
+
         if move.should_terminate:
-            self._done.set()
+            # Derive outcome from the terminating move
+            from app.hotel.enums import MoveType, NegotiationOutcome
+            if move.move_type == MoveType.ACCEPT:
+                self._state.outcome = NegotiationOutcome.RATE_CONFIRMED
+            elif move.move_type == MoveType.CLOSE:
+                # Close without accept -- check if hotel asked for callback
+                last_hotel = next(
+                    (t["content"] for t in reversed(self._state.transcript) if t["role"] == "hotel"),
+                    "",
+                )
+                if any(w in last_hotel.lower() for w in ("call back", "callback", "call you back", "follow up")):
+                    self._state.outcome = NegotiationOutcome.CALLBACK_REQUESTED
+                else:
+                    self._state.outcome = NegotiationOutcome.NO_AVAILABILITY
+            else:
+                self._state.outcome = NegotiationOutcome.FAILED
+
+            # Send a Twilio mark after the final audio. The inbound loop
+            # will fire _done.set() when Twilio confirms the audio has
+            # finished playing, so the caller hears the full message
+            # before the call is terminated.
+            try:
+                mark_id = await self._bridge.send_mark("hangup")
+                self._pending_hangup_mark = mark_id
+                logger.info("Termination mark sent, waiting for playback to finish")
+            except Exception:
+                logger.warning("Failed to send hangup mark, terminating immediately")
+                self._done.set()
 
     async def _decide_with_guardrails(self) -> AgentMove:
         guardrail_feedback: str | None = None
@@ -279,3 +356,38 @@ class VoicePipeline:
 
     def signal_done(self) -> None:
         self._done.set()
+
+    def _derive_outcome(self) -> "NegotiationOutcome":
+        """Derive the negotiation outcome from the moves made during the call."""
+        from app.hotel.enums import MoveType, NegotiationOutcome
+
+        if not self._state.moves_made:
+            return NegotiationOutcome.FAILED
+
+        last_move = self._state.moves_made[-1]
+
+        # Explicit accept move means rate was confirmed
+        if last_move.move_type == MoveType.ACCEPT:
+            return NegotiationOutcome.RATE_CONFIRMED
+
+        # Any move that accepted is a confirmed rate
+        for move in reversed(self._state.moves_made):
+            if move.move_type == MoveType.ACCEPT:
+                return NegotiationOutcome.RATE_CONFIRMED
+
+        # Check transcript for callback indicators
+        for entry in reversed(self._state.transcript):
+            if entry["role"] == "hotel":
+                text = entry["content"].lower()
+                if any(w in text for w in ("call back", "callback", "call you back", "follow up", "ring you back")):
+                    return NegotiationOutcome.CALLBACK_REQUESTED
+                if any(w in text for w in ("no availability", "sold out", "fully booked", "no rooms")):
+                    return NegotiationOutcome.NO_AVAILABILITY
+                break  # only check the last hotel utterance
+
+        # Close move without accept
+        if last_move.move_type == MoveType.CLOSE:
+            return NegotiationOutcome.FAILED
+
+        # Fell through -- timed out or disconnected
+        return NegotiationOutcome.TIMED_OUT

@@ -212,6 +212,8 @@ class LaunchNegotiationRequest(GalileoBaseModel):
     attendees: int
     budgetPerPerson: float | None = None
     requirements: str | None = None
+    idealPrice: float | None = None
+    ceilingPrice: float | None = None
     guardrails: LaunchGuardrails | None = None
 
 
@@ -220,6 +222,33 @@ class InterventionResult(GalileoBaseModel):
     status: str
     callRoutingInfo: str | None = None
     transferredAt: str
+
+
+class PriceChangeRequest(GalileoBaseModel):
+    price: float
+    source: Literal["galileo", "hotel_rep"]
+    round: int | None = None
+
+
+class PriceChangeResult(GalileoBaseModel):
+    agentId: str
+    price: float
+    previousPrice: float
+    marketPrice: float
+    source: Literal["galileo", "hotel_rep"]
+    round: int
+
+
+class FinalOfferRequest(GalileoBaseModel):
+    finalPrice: float
+    enterpriseId: str
+
+
+class FinalOfferResult(GalileoBaseModel):
+    agentId: str
+    finalPrice: float
+    marketPrice: float
+    savings: float
 
 
 GalileoEvent.model_rebuild()

@@ -41,6 +41,7 @@ class PricePointType(str, Enum):
     OFFER = "offer"
     NEGOTIATED = "negotiated"
     CURRENT = "current"
+    FINAL = "final"
 
 
 class BookingWindowStatus(str, Enum):

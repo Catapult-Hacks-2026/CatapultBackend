@@ -202,6 +202,264 @@ def _serialize_event(
     }
 
 
+async def append_agent_message(agent_id: str, message: str, sender: str) -> None:
+    content = (message or "").strip()
+    if not content:
+        return
+
+    conn = await _connect()
+    try:
+        await conn.execute(
+            """
+            INSERT INTO galileo_messages (id, agent_id, message, sender, timestamp)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (str(uuid4()), agent_id, content, sender, _now_iso()),
+        )
+        await conn.commit()
+    finally:
+        await conn.close()
+
+
+async def mark_agent_dialing(agent_id: str, call_sid: str) -> None:
+    conn = await _connect()
+    try:
+        await conn.execute("BEGIN IMMEDIATE")
+        row = await _fetchone(
+            conn,
+            "SELECT current_price FROM galileo_agents WHERE id = ?",
+            (agent_id,),
+        )
+        if row is None:
+            await conn.rollback()
+            return
+
+        await conn.execute(
+            """
+            UPDATE galileo_agents
+            SET status = ?
+            WHERE id = ?
+            """,
+            (GALILEO_NEGOTIATING_STATUS, agent_id),
+        )
+        await conn.execute("UPDATE galileo_activity_stream SET active = 0 WHERE agent_id = ?", (agent_id,))
+        await conn.execute(
+            """
+            INSERT INTO galileo_activity_stream (
+                id, agent_id, price, badge, badge_type, detail, detail_type, timestamp, active
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+            """,
+            (
+                str(uuid4()),
+                agent_id,
+                float(row["current_price"] or 0),
+                "Dialing",
+                "neutral",
+                f"Live call started. Call SID: {call_sid}",
+                "neutral",
+                _now_iso(),
+            ),
+        )
+        await conn.commit()
+    except Exception:
+        await conn.rollback()
+        raise
+    finally:
+        await conn.close()
+
+
+async def record_agent_quote(
+    agent_id: str,
+    nightly_rate: float,
+    rate_type: str = "",
+) -> None:
+    conn = await _connect()
+    try:
+        await conn.execute("BEGIN IMMEDIATE")
+        row = await _fetchone(
+            conn,
+            """
+            SELECT current_price
+            FROM galileo_agents
+            WHERE id = ?
+            """,
+            (agent_id,),
+        )
+        if row is None:
+            await conn.rollback()
+            return
+
+        cursor = await conn.execute(
+            "SELECT COALESCE(MAX(round), 0) FROM galileo_price_points WHERE agent_id = ?",
+            (agent_id,),
+        )
+        max_round_row = await cursor.fetchone()
+        await cursor.close()
+        round_number = int(max_round_row[0] or 0) + 1
+        point_type = "offer" if round_number <= 2 else "negotiated"
+        label_suffix = f" ({rate_type})" if rate_type else ""
+
+        await conn.execute(
+            """
+            UPDATE galileo_agents
+            SET status = ?, current_price = ?
+            WHERE id = ?
+            """,
+            (GALILEO_NEGOTIATING_STATUS, nightly_rate, agent_id),
+        )
+        await conn.execute(
+            """
+            INSERT INTO galileo_price_points (agent_id, label, price, type, round)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                agent_id,
+                f"Live Quote{label_suffix}",
+                nightly_rate,
+                point_type,
+                round_number,
+            ),
+        )
+        await conn.execute("UPDATE galileo_activity_stream SET active = 0 WHERE agent_id = ?", (agent_id,))
+        await conn.execute(
+            """
+            INSERT INTO galileo_activity_stream (
+                id, agent_id, price, badge, badge_type, detail, detail_type, timestamp, active
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+            """,
+            (
+                str(uuid4()),
+                agent_id,
+                nightly_rate,
+                "Quote Received",
+                "neutral",
+                f"Hotel quoted ${nightly_rate:.2f}/night{label_suffix}.",
+                "positive",
+                _now_iso(),
+            ),
+        )
+        await conn.commit()
+    except Exception:
+        await conn.rollback()
+        raise
+    finally:
+        await conn.close()
+
+
+def _final_status_for_outcome(outcome: str | None) -> tuple[str, str | None, str, str]:
+    normalized = (outcome or "").upper()
+    if normalized == "CALLBACK_REQUESTED":
+        return ("Reviewing", normalized, "Follow-up", "Hotel requested callback or offline follow-up.")
+    if normalized == "ESCALATED_TO_HUMAN":
+        return ("Reviewing", normalized, "Escalated", "Negotiation requires human follow-up.")
+    if normalized == "NO_AVAILABILITY":
+        return ("Completed", normalized, "No Availability", "Hotel reported no availability for the requested stay.")
+    if normalized == "TIMED_OUT":
+        return ("Completed", normalized, "Timed Out", "Live negotiation timed out before a final agreement.")
+    if normalized == "FAILED":
+        return ("Completed", normalized, "Failed", "Live negotiation completed without a usable agreement.")
+    return ("Completed", normalized or None, "Completed", "Live negotiation completed.")
+
+
+async def finalize_agent_run(
+    agent_id: str,
+    outcome: str | None,
+    best_rate: float | None = None,
+) -> None:
+    conn = await _connect()
+    try:
+        row = await _fetchone(
+            conn,
+            """
+            SELECT enterprise_id, event_id, current_price
+            FROM galileo_agents
+            WHERE id = ?
+            """,
+            (agent_id,),
+        )
+    finally:
+        await conn.close()
+
+    if row is None:
+        return
+
+    normalized = (outcome or "").upper()
+    if normalized == "RATE_CONFIRMED":
+        await accept_offer(row["event_id"], agent_id, row["enterprise_id"])
+        final_price = best_rate if best_rate is not None else float(row["current_price"] or 0)
+        conn = await _connect()
+        try:
+            await conn.execute("BEGIN IMMEDIATE")
+            await conn.execute("UPDATE galileo_activity_stream SET active = 0 WHERE agent_id = ?", (agent_id,))
+            await conn.execute(
+                """
+                INSERT INTO galileo_activity_stream (
+                    id, agent_id, price, badge, badge_type, detail, detail_type, timestamp, active
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+                """,
+                (
+                    str(uuid4()),
+                    agent_id,
+                    final_price,
+                    "Accepted",
+                    "savings",
+                    f"Negotiation closed successfully at ${final_price:.2f}/night.",
+                    "positive",
+                    _now_iso(),
+                ),
+            )
+            await conn.commit()
+        except Exception:
+            await conn.rollback()
+            raise
+        finally:
+            await conn.close()
+        return
+
+    status, stored_outcome, badge, detail = _final_status_for_outcome(outcome)
+    final_price = best_rate if best_rate is not None else float(row["current_price"] or 0)
+    conn = await _connect()
+    try:
+        await conn.execute("BEGIN IMMEDIATE")
+        await conn.execute(
+            """
+            UPDATE galileo_agents
+            SET status = ?, outcome = ?, current_price = ?, is_accepted = 0
+            WHERE id = ?
+            """,
+            (status, stored_outcome, final_price, agent_id),
+        )
+        await conn.execute("UPDATE galileo_activity_stream SET active = 0 WHERE agent_id = ?", (agent_id,))
+        await conn.execute(
+            """
+            INSERT INTO galileo_activity_stream (
+                id, agent_id, price, badge, badge_type, detail, detail_type, timestamp, active
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                str(uuid4()),
+                agent_id,
+                final_price,
+                badge,
+                "neutral" if normalized in {"CALLBACK_REQUESTED", "ESCALATED_TO_HUMAN"} else "error",
+                detail,
+                "neutral" if normalized in {"CALLBACK_REQUESTED", "ESCALATED_TO_HUMAN"} else "negative",
+                _now_iso(),
+                1,
+            ),
+        )
+        await conn.commit()
+    except Exception:
+        await conn.rollback()
+        raise
+    finally:
+        await conn.close()
+
+
 async def _fetchone(conn: aiosqlite.Connection, query: str, params: tuple[Any, ...] = ()) -> aiosqlite.Row | None:
     cursor = await conn.execute(query, params)
     row = await cursor.fetchone()
@@ -1032,6 +1290,9 @@ async def create_event_with_agents(launch_request: Any) -> dict[str, Any] | None
     budget_per_person = _get_value(payload, "budgetPerPerson", "budget_per_person")
     requirements = _coerce_json_text(_get_value(payload, "requirements"))
     guardrails = _get_value(payload, "guardrails", default={}) or {}
+    # Top-level idealPrice/ceilingPrice override guardrails
+    top_ideal = _get_value(payload, "idealPrice", "ideal_price")
+    top_ceiling = _get_value(payload, "ceilingPrice", "ceiling_price")
 
     conn = await _connect()
     try:
@@ -1094,8 +1355,10 @@ async def create_event_with_agents(launch_request: Any) -> dict[str, Any] | None
             for idx, company in enumerate(selected_rows):
                 lower_type = service_type.lower()
                 type_guardrails = guardrails.get(lower_type, {}) if isinstance(guardrails, dict) else {}
+                # Top-level idealPrice/ceilingPrice take priority over nested guardrails
                 ideal_price = float(
-                    type_guardrails.get("idealPrice")
+                    top_ideal
+                    or type_guardrails.get("idealPrice")
                     or type_guardrails.get("ideal_price")
                     or (budget_per_person or 0)
                 )
@@ -1104,7 +1367,8 @@ async def create_event_with_agents(launch_request: Any) -> dict[str, Any] | None
                     ideal_price = round(random.uniform(minimum, maximum), 2)
 
                 ceiling_price = float(
-                    type_guardrails.get("ceilingPrice")
+                    top_ceiling
+                    or type_guardrails.get("ceilingPrice")
                     or type_guardrails.get("ceiling_price")
                     or (ideal_price * 1.15)
                 )
@@ -1250,6 +1514,306 @@ async def intervene_agent(agent_id: str) -> dict[str, Any] | None:
         await conn.close()
 
 
+async def record_price_change(
+    agent_id: str,
+    price: float,
+    source: str,
+    round_num: int | None = None,
+) -> dict[str, Any] | None:
+    """Record a confirmed price change during negotiation.
+
+    Args:
+        agent_id: The galileo agent id.
+        price: The new price per night.
+        source: Who proposed it -- "galileo" or "hotel_rep".
+        round_num: Optional explicit round number. Auto-increments if omitted.
+    """
+    conn = await _connect()
+    try:
+        await conn.execute("BEGIN IMMEDIATE")
+
+        row = await _fetchone(
+            conn,
+            "SELECT id, current_price, market_price FROM galileo_agents WHERE id = ?",
+            (agent_id,),
+        )
+        if row is None:
+            await conn.rollback()
+            return None
+
+        previous_price = float(row["current_price"] or 0)
+        market_price = float(row["market_price"] or 0)
+
+        # Update current_price on the agent
+        await conn.execute(
+            "UPDATE galileo_agents SET current_price = ? WHERE id = ?",
+            (price, agent_id),
+        )
+
+        # Determine round
+        if round_num is None:
+            max_row = await _fetchone(
+                conn,
+                "SELECT COALESCE(MAX(round), 0) AS max_round FROM galileo_price_points WHERE agent_id = ?",
+                (agent_id,),
+            )
+            round_num = (max_row["max_round"] if max_row else 0) + 1
+
+        # Insert price point
+        label = "Galileo Counter" if source == "galileo" else "Hotel Offer"
+        pp_type = "negotiated" if source == "galileo" else "offer"
+        await conn.execute(
+            """
+            INSERT INTO galileo_price_points (agent_id, label, price, type, round)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (agent_id, label, price, pp_type, round_num),
+        )
+
+        # Activity stream entry
+        direction = "down" if price < previous_price else "up"
+        badge_type = "savings" if price < previous_price else "neutral"
+        source_label = "Galileo" if source == "galileo" else "Hotel Rep"
+        detail = f"${price:.2f}/night ({source_label})"
+        if previous_price > 0:
+            delta = previous_price - price
+            detail += f" | {'saved' if delta > 0 else 'increased'} ${abs(delta):.2f}"
+
+        activity_id = str(uuid4())
+        await conn.execute(
+            """
+            INSERT INTO galileo_activity_stream (
+                id, agent_id, price, badge, badge_type, detail, detail_type, timestamp, active
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+            """,
+            (
+                activity_id,
+                agent_id,
+                price,
+                f"Price {direction.title()}",
+                badge_type,
+                detail,
+                "positive" if price < previous_price else "negative",
+                _now_iso(),
+            ),
+        )
+
+        await conn.commit()
+        return {
+            "agent_id": agent_id,
+            "price": price,
+            "previous_price": previous_price,
+            "market_price": market_price,
+            "source": source,
+            "round": round_num,
+            "activity_id": activity_id,
+        }
+    except Exception:
+        await conn.rollback()
+        raise
+    finally:
+        await conn.close()
+
+
+async def record_final_offer(
+    agent_id: str,
+    final_price: float,
+    enterprise_id: str,
+) -> dict[str, Any] | None:
+    """Record the final offer once a deal is closed.
+
+    Updates the agent status to Completed, marks outcome as RATE_CONFIRMED,
+    inserts a final price point, and updates enterprise savings.
+    """
+    conn = await _connect()
+    try:
+        await conn.execute("BEGIN IMMEDIATE")
+
+        row = await _fetchone(
+            conn,
+            """
+            SELECT id, event_id, market_price, current_price, is_accepted
+            FROM galileo_agents WHERE id = ?
+            """,
+            (agent_id,),
+        )
+        if row is None:
+            await conn.rollback()
+            return None
+
+        market_price = float(row["market_price"] or 0)
+        savings = max(0.0, market_price - final_price)
+
+        # Update agent
+        await conn.execute(
+            """
+            UPDATE galileo_agents
+            SET current_price = ?,
+                status = 'Completed',
+                outcome = 'RATE_CONFIRMED',
+                is_accepted = 1
+            WHERE id = ?
+            """,
+            (final_price, agent_id),
+        )
+
+        # Final price point
+        max_row = await _fetchone(
+            conn,
+            "SELECT COALESCE(MAX(round), 0) AS max_round FROM galileo_price_points WHERE agent_id = ?",
+            (agent_id,),
+        )
+        next_round = (max_row["max_round"] if max_row else 0) + 1
+        await conn.execute(
+            """
+            INSERT INTO galileo_price_points (agent_id, label, price, type, round)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (agent_id, "Final Accepted", final_price, "final", next_round),
+        )
+
+        # Activity stream
+        activity_id = str(uuid4())
+        await conn.execute(
+            """
+            INSERT INTO galileo_activity_stream (
+                id, agent_id, price, badge, badge_type, detail, detail_type, timestamp, active
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+            """,
+            (
+                activity_id,
+                agent_id,
+                final_price,
+                "Deal Closed",
+                "savings",
+                f"Final rate: ${final_price:.2f}/night | Saved ${savings:.2f} vs market",
+                "positive",
+                _now_iso(),
+            ),
+        )
+
+        # Update enterprise savings
+        if enterprise_id:
+            await conn.execute(
+                """
+                UPDATE galileo_enterprises
+                SET total_saved = COALESCE(total_saved, 0) + ?,
+                    total_saved_hotels = COALESCE(total_saved_hotels, 0) + ?,
+                    hotel_contract_count = COALESCE(hotel_contract_count, 0) + 1
+                WHERE id = ?
+                """,
+                (savings, savings, enterprise_id),
+            )
+
+        await conn.commit()
+        return {
+            "agent_id": agent_id,
+            "final_price": final_price,
+            "market_price": market_price,
+            "savings": savings,
+            "activity_id": activity_id,
+        }
+    except Exception:
+        await conn.rollback()
+        raise
+    finally:
+        await conn.close()
+
+
+async def update_agent_call_result(
+    agent_id: str,
+    status: str,
+    outcome: str | None = None,
+    current_price: float | None = None,
+) -> bool:
+    """Update a galileo_agent row with the call outcome and add an activity entry."""
+    conn = await _connect()
+    try:
+        await conn.execute("BEGIN IMMEDIATE")
+
+        row = await _fetchone(
+            conn,
+            "SELECT id FROM galileo_agents WHERE id = ?",
+            (agent_id,),
+        )
+        if row is None:
+            await conn.rollback()
+            return False
+
+        set_clauses = ["status = ?"]
+        params: list[Any] = [status]
+        if outcome is not None:
+            set_clauses.append("outcome = ?")
+            params.append(outcome)
+        if current_price is not None:
+            set_clauses.append("current_price = ?")
+            params.append(current_price)
+        params.append(agent_id)
+
+        await conn.execute(
+            f"UPDATE galileo_agents SET {', '.join(set_clauses)} WHERE id = ?",
+            tuple(params),
+        )
+
+        # Determine badge text and type from outcome
+        _badge_map: dict[str, tuple[str, str]] = {
+            "rate_confirmed": ("Rate Confirmed", "positive"),
+            "callback_requested": ("Callback Requested", "neutral"),
+            "no_availability": ("No Availability", "negative"),
+            "escalated_to_human": ("Escalated to Human", "neutral"),
+            "failed": ("Call Failed", "negative"),
+            "timed_out": ("Timed Out", "negative"),
+        }
+        badge, badge_type = _badge_map.get(outcome or "", ("Call Ended", "neutral"))
+        detail = f"Final rate: ${current_price:.2f}/night" if current_price else f"Outcome: {outcome or status}"
+        detail_type = badge_type
+
+        await conn.execute(
+            """
+            INSERT INTO galileo_activity_stream (
+                id, agent_id, price, badge, badge_type, detail, detail_type, timestamp, active
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+            """,
+            (
+                str(uuid4()),
+                agent_id,
+                current_price or 0,
+                badge,
+                badge_type,
+                detail,
+                detail_type,
+                _now_iso(),
+            ),
+        )
+
+        # Add a final price point if we have a price
+        if current_price is not None:
+            max_round = await _fetchone(
+                conn,
+                "SELECT COALESCE(MAX(round), 0) AS max_round FROM galileo_price_points WHERE agent_id = ?",
+                (agent_id,),
+            )
+            next_round = (max_round["max_round"] if max_round else 0) + 1
+            await conn.execute(
+                """
+                INSERT INTO galileo_price_points (agent_id, label, price, type, round)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (agent_id, "Final", current_price, "final", next_round),
+            )
+
+        await conn.commit()
+        return True
+    except Exception:
+        await conn.rollback()
+        raise
+    finally:
+        await conn.close()
+
+
 async def delete_event(event_id: str) -> bool:
     conn = await _connect()
     try:
@@ -1261,6 +1825,7 @@ async def delete_event(event_id: str) -> bool:
         )
         for row in agent_rows:
             aid = row["id"]
+            await conn.execute("DELETE FROM galileo_previous_negotiations WHERE agent_id = ?", (aid,))
             await conn.execute("DELETE FROM galileo_price_points WHERE agent_id = ?", (aid,))
             await conn.execute("DELETE FROM galileo_activity_stream WHERE agent_id = ?", (aid,))
             await conn.execute("DELETE FROM galileo_messages WHERE agent_id = ?", (aid,))

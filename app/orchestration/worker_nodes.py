@@ -1,10 +1,20 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from app.core.config import get_settings
 from app.core.shared_clients import get_http_client
 from app.core.events import EventType, WorkerEvent, get_event_bus
+from app.artifacts.schemas import EmailAttachment
+from app.email.contract_artifacts import (
+    build_contract_artifacts,
+    build_receipt_email_body,
+    build_receipt_email_subject,
+    resolve_receipt_recipient,
+)
+from app.email.mailgun_provider import MailgunProvider
+from app.email.schemas import OutboundEmail
 from app.hotel.enums import NegotiationOutcome, SessionStatus
 from app.hotel.schemas import WorkerSessionState
 from app.orchestration.session_lock import get_lock_manager
@@ -22,29 +32,6 @@ def _backend_url(path: str) -> str:
 
 async def load_context_node(state: WorkerSessionState) -> dict:
     hotel_id = state.hotel_target.hotel_id
-    client = get_http_client()
-    try:
-        hotel_resp = await client.get(_backend_url(f"/api/hotels/{hotel_id}"))
-        hotel_data = hotel_resp.json() if hotel_resp.status_code == 200 else {}
-    except Exception as exc:
-        logger.warning("load_context: failed to fetch hotel %s: %s", hotel_id, exc)
-        hotel_data = {}
-
-    try:
-        quotes_resp = await client.get(_backend_url(f"/api/hotels/{hotel_id}/quotes"))
-        prior_quotes = quotes_resp.json() if quotes_resp.status_code == 200 else []
-    except Exception as exc:
-        logger.warning("load_context: failed to fetch quotes for %s: %s", hotel_id, exc)
-
-    prior_low = min((q.get("nightly_rate", 0) for q in prior_quotes if q.get("nightly_rate")), default=None)
-    prior_count = len(prior_quotes)
-
-    negotiation_summary = None
-    if prior_count > 0 and prior_low is not None:
-        negotiation_summary = (
-            f"{prior_count} prior quote(s) on record. "
-            f"Lowest historical rate: ${prior_low:.2f}/night."
-        )
 
     # Fetch market intelligence from Redis (historic rates + past deals)
     from app.services.market_data import get_market_context
@@ -62,9 +49,12 @@ async def load_context_node(state: WorkerSessionState) -> dict:
     except Exception as exc:
         logger.warning("load_context: market data retrieval failed: %s", exc)
 
+    # Mutate the original state object directly so the VoicePipeline
+    # (which holds a reference to this same object) sees the data.
+    state.behavioral_priors["market_brief"] = market_brief
+
     return {
         "behavioral_priors": {
-            "negotiation_summary": negotiation_summary,
             "market_brief": market_brief,
         }
     }
@@ -74,9 +64,10 @@ async def load_memory_node(state: WorkerSessionState) -> dict:
     from app.memory.behavioral_store import get_behavioral_store
     store = get_behavioral_store()
     profile = await store.load_priors(state.hotel_target.hotel_id)
-    # Merge with existing priors (preserves market_brief from load_context_node)
+    # Mutate the original state object directly so the VoicePipeline sees it.
+    state.behavioral_priors["negotiation_summary"] = profile.to_prompt_context()
+
     merged = dict(state.behavioral_priors)
-    merged["negotiation_summary"] = profile.to_prompt_context()
     return {
         "behavioral_priors": merged,
     }
@@ -134,6 +125,14 @@ async def start_voice_node(state: WorkerSessionState) -> dict:
             hotel_id=state.hotel_target.hotel_id,
             payload={"call_sid": call.sid},
         ))
+        galileo_agent_id = state.hotel_target.market_context.get("galileo_agent_id")
+        if isinstance(galileo_agent_id, str) and galileo_agent_id.strip():
+            try:
+                from app.galileo.database import mark_agent_dialing
+
+                await mark_agent_dialing(galileo_agent_id, call.sid)
+            except Exception:
+                logger.exception("Failed to sync start state to Galileo agent %s", galileo_agent_id)
         return {"call_sid": call.sid, "status": SessionStatus.RINGING}
     except Exception as exc:
         logger.error("start_voice_node: Twilio call failed: %s", exc)
@@ -181,6 +180,18 @@ async def listen_node(state: WorkerSessionState) -> dict:
         len(state.quotes_received),
         state.outcome,
     )
+
+    # Hang up the Twilio call
+    if state.call_sid:
+        try:
+            from twilio.rest import Client as TwilioClient
+            _settings = get_settings()
+            client = TwilioClient(_settings.twilio_account_sid, _settings.twilio_auth_token)
+            client.calls(state.call_sid).update(status="completed")
+            logger.info("listen_node: hung up call session_id=%s call_sid=%s", state.session_id, state.call_sid)
+        except Exception as exc:
+            logger.warning("listen_node: failed to hang up call %s: %s", state.call_sid, exc)
+
     return {"status": SessionStatus.COMPLETED}
 
 
@@ -289,10 +300,42 @@ def route_terminate(state: WorkerSessionState) -> str:
     return "continue"
 
 
+_OUTCOME_TO_GALILEO_STATUS: dict[str, str] = {
+    NegotiationOutcome.RATE_CONFIRMED: "Completed",
+    NegotiationOutcome.CALLBACK_REQUESTED: "Awaiting Callback",
+    NegotiationOutcome.NO_AVAILABILITY: "Completed",
+    NegotiationOutcome.ESCALATED_TO_HUMAN: "Reviewing",
+    NegotiationOutcome.FAILED: "Failed",
+    NegotiationOutcome.TIMED_OUT: "Failed",
+}
+
+
+async def _update_galileo_agent(
+    agent_id: str,
+    outcome: str | NegotiationOutcome,
+    best_rate: float | None,
+) -> None:
+    """Persist call result to the galileo_agents table so the frontend sees it."""
+    from app.galileo.database import update_agent_call_result
+
+    status = _OUTCOME_TO_GALILEO_STATUS.get(str(outcome), "Completed")
+    try:
+        await update_agent_call_result(
+            agent_id=agent_id,
+            status=status,
+            outcome=str(outcome),
+            current_price=best_rate,
+        )
+    except Exception as exc:
+        logger.warning("_update_galileo_agent: failed for agent %s: %s", agent_id, exc)
+
+
 async def post_call_node(state: WorkerSessionState) -> dict:
     # If the lock was lost, only mark the session as failed and emit the
     # event — skip analysis, summaries, and memory writes that could
     # conflict with a replacement worker that now owns this hotel.
+    galileo_agent_id = state.hotel_target.market_context.get("galileo_agent_id")
+
     if "lock expired" in state.error_log:
         logger.info("post_call_node: lock lost for session %s, marking failed", state.session_id)
         client = get_http_client()
@@ -303,12 +346,16 @@ async def post_call_node(state: WorkerSessionState) -> dict:
             })
         except Exception as exc:
             logger.warning("post_call_node: failed to patch session status: %s", exc)
+
+        if galileo_agent_id:
+            await _update_galileo_agent(galileo_agent_id, NegotiationOutcome.FAILED, None)
+
         await get_event_bus().publish(WorkerEvent(
             event_type=EventType.WORKER_FAILED,
             session_id=state.session_id,
             campaign_id=state.campaign_id,
             hotel_id=state.hotel_target.hotel_id,
-            payload={"reason": "lock expired"},
+            payload={"reason": "lock expired", "galileo_agent_id": galileo_agent_id},
         ))
         return {"status": SessionStatus.FAILED, "outcome": NegotiationOutcome.FAILED}
 
@@ -317,11 +364,33 @@ async def post_call_node(state: WorkerSessionState) -> dict:
 
     try:
         analysis = await analyze_call(state)
+        state.outcome = analysis.outcome
+        state.report_summary = analysis.summary
+        receipt_recipient = resolve_receipt_recipient(state)
+        if receipt_recipient:
+            try:
+                artifacts = await build_contract_artifacts(state)
+                await _send_voice_receipt_email(state, receipt_recipient, artifacts.pdf_path)
+                if state.receipt_artifacts is not None:
+                    state.receipt_artifacts.email_sent_to = receipt_recipient
+            except Exception as exc:
+                logger.warning("voice receipt send failed for %s: %s", state.session_id, exc)
+                state.error_log.append(f"receipt_send_failed: {exc}")
+
+        # Prefer the deterministic outcome set by the pipeline over the LLM's guess.
+        # The pipeline derives outcome from actual moves (ACCEPT -> RATE_CONFIRMED, etc.)
+        # Only fall back to the LLM outcome if the pipeline didn't set one.
+        final_outcome = state.outcome if state.outcome is not None else analysis.outcome
+        # If pipeline says RATE_CONFIRMED (agent explicitly accepted), trust it
+        # even if the LLM disagrees.
+        if state.outcome == NegotiationOutcome.RATE_CONFIRMED:
+            final_outcome = NegotiationOutcome.RATE_CONFIRMED
+        analysis.outcome = final_outcome
 
         client = get_http_client()
         await client.patch(_backend_url(f"/api/sessions/{state.session_id}"), json={
             "status": SessionStatus.COMPLETED,
-            "outcome": analysis.outcome,
+            "outcome": final_outcome,
             "transcript": state.transcript,
             "summary": analysis.summary,
             "key_patterns": analysis.key_patterns,
@@ -329,6 +398,8 @@ async def post_call_node(state: WorkerSessionState) -> dict:
             "call_quality_score": analysis.call_quality_score,
             "follow_up_recommended": analysis.follow_up_recommended,
             "follow_up_reason": analysis.follow_up_reason,
+            "contract_details": state.contract_details.model_dump() if state.contract_details else None,
+            "receipt_artifacts": state.receipt_artifacts.model_dump() if state.receipt_artifacts else None,
         })
 
         store = get_behavioral_store()
@@ -343,6 +414,9 @@ async def post_call_node(state: WorkerSessionState) -> dict:
 
         best_rate = min((q.nightly_rate for q in state.quotes_received), default=None)
 
+        if galileo_agent_id:
+            await _update_galileo_agent(galileo_agent_id, analysis.outcome, best_rate)
+
         # Emit outcome event
         event_type = (
             EventType.DEAL_CLOSED
@@ -356,20 +430,71 @@ async def post_call_node(state: WorkerSessionState) -> dict:
             session_id=state.session_id,
             campaign_id=state.campaign_id,
             hotel_id=state.hotel_target.hotel_id,
-            payload={"outcome": analysis.outcome, "best_rate": best_rate},
+            payload={"outcome": analysis.outcome, "best_rate": best_rate, "galileo_agent_id": galileo_agent_id},
         ))
 
         return {"status": SessionStatus.COMPLETED, "outcome": analysis.outcome}
     except Exception as exc:
         logger.exception("post_call_node failed: %s", exc)
+        if galileo_agent_id:
+            await _update_galileo_agent(galileo_agent_id, NegotiationOutcome.FAILED, None)
+
         await get_event_bus().publish(WorkerEvent(
             event_type=EventType.WORKER_FAILED,
             session_id=state.session_id,
             campaign_id=state.campaign_id,
             hotel_id=state.hotel_target.hotel_id,
-            payload={"reason": str(exc)},
+            payload={"reason": str(exc), "galileo_agent_id": galileo_agent_id},
         ))
         return {"status": SessionStatus.COMPLETED, "outcome": NegotiationOutcome.FAILED}
+
+
+async def _send_voice_receipt_email(state: WorkerSessionState, recipient: str, pdf_path: str) -> None:
+    if state.contract_details is None:
+        logger.warning("voice_receipt_email: session_id=%s skipped because contract_details is missing", state.session_id)
+        return
+
+    pdf_file = Path(pdf_path)
+    provider = MailgunProvider()
+    outbound = OutboundEmail(
+        to_address=recipient,
+        subject=build_receipt_email_subject(
+            state.contract_details,
+            state.outcome.value if state.outcome else None,
+        ),
+        text=build_receipt_email_body(
+            state.contract_details,
+            session_state=state,
+            outcome=state.outcome.value if state.outcome else None,
+        ),
+        metadata={
+            "session_id": state.session_id,
+            "channel": "voice",
+            "artifact_type": "negotiation_report",
+        },
+        attachments=[
+            EmailAttachment(
+                filename=pdf_file.name,
+                content_type="application/pdf",
+                data=pdf_file.read_bytes(),
+            )
+        ],
+    )
+    logger.info(
+        "voice_receipt_email: session_id=%s recipient=%s subject=%s pdf_path=%s attachments=%d",
+        state.session_id,
+        recipient,
+        outbound.subject,
+        pdf_path,
+        len(outbound.attachments),
+    )
+    receipt = await provider.send_message(outbound)
+    logger.info(
+        "voice_receipt_email: session_id=%s provider=%s provider_message_id=%s",
+        state.session_id,
+        receipt.provider,
+        receipt.provider_message_id,
+    )
 
 
 async def emit_memory_node(state: WorkerSessionState) -> dict:

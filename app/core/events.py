@@ -23,6 +23,8 @@ class EventType(str, Enum):
     TRANSCRIPT_PARTIAL = "transcript_partial"
     TRANSCRIPT_FINAL = "transcript_final"
     CALL_ENDED = "call_ended"
+    PRICE_CHANGED = "price_changed"
+    DEAL_FINALIZED = "deal_finalized"
 
 
 class WorkerEvent(BaseModel):

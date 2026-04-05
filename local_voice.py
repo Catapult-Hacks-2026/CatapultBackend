@@ -70,6 +70,23 @@ async def on_end(state: WorkerSessionState):
 
 async def main(args: argparse.Namespace) -> None:
     session = build_session(args)
+
+    # Seed market data into DB + Redis so the brain has RAG context
+    from app.core.database import init_db
+    from app.galileo.database import init_galileo_db
+
+    await init_galileo_db()
+    init_db()
+
+    # Load market context and behavioral memory (mirrors worker graph nodes)
+    from app.orchestration.worker_nodes import load_context_node, load_memory_node
+
+    context_update = await load_context_node(session)
+    session = session.model_copy(update=context_update)
+    memory_update = await load_memory_node(session)
+    session = session.model_copy(update=memory_update)
+    logger.info("Session priors loaded: %s", list(session.behavioral_priors.keys()))
+
     bridge = LocalBridge()
 
     pipeline = VoicePipeline(
@@ -78,13 +95,6 @@ async def main(args: argparse.Namespace) -> None:
         on_quote_received=on_quote,
         on_session_end=on_end,
     )
-
-    # Seed market data into DB + Redis so the brain has RAG context
-    from app.core.database import init_db
-    from app.galileo.database import init_galileo_db
-
-    await init_galileo_db()
-    init_db()
 
     print(f"\nSession {session.session_id}")
     print(f"  Hotel: {args.hotel_name or session.hotel_target.hotel_id}  |  Location: {args.location}")
