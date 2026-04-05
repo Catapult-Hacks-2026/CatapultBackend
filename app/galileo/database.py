@@ -1248,3 +1248,30 @@ async def intervene_agent(agent_id: str) -> dict[str, Any] | None:
         raise
     finally:
         await conn.close()
+
+
+async def delete_event(event_id: str) -> bool:
+    conn = await _connect()
+    try:
+        await conn.execute("BEGIN IMMEDIATE")
+        agent_rows = await _fetchall(
+            conn,
+            "SELECT id FROM galileo_agents WHERE event_id = ?",
+            (event_id,),
+        )
+        for row in agent_rows:
+            aid = row["id"]
+            await conn.execute("DELETE FROM galileo_price_points WHERE agent_id = ?", (aid,))
+            await conn.execute("DELETE FROM galileo_activity_stream WHERE agent_id = ?", (aid,))
+            await conn.execute("DELETE FROM galileo_messages WHERE agent_id = ?", (aid,))
+
+        await conn.execute("DELETE FROM galileo_agents WHERE event_id = ?", (event_id,))
+        result = await conn.execute("DELETE FROM galileo_events WHERE id = ?", (event_id,))
+        deleted = result.rowcount > 0
+        await conn.commit()
+        return deleted
+    except Exception:
+        await conn.rollback()
+        raise
+    finally:
+        await conn.close()

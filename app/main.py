@@ -10,6 +10,7 @@ from app.galileo.router import router as galileo_router
 from app.galileo.seed import seed_galileo_data
 from app.routers.campaigns import router as campaigns_router
 from app.routers.hotel_data import router as hotel_data_router
+from app.routers.transcript_ws import router as transcript_ws_router
 from app.routers.voice import router as voice_router
 
 logging.basicConfig(
@@ -69,6 +70,7 @@ app.include_router(voice_router, prefix="/voice", tags=["voice"])
 app.include_router(campaigns_router, prefix="/api", tags=["campaigns"])
 app.include_router(hotel_data_router, prefix="/api/hotel-data", tags=["hotel-data"])
 app.include_router(galileo_router, prefix="/api/galileo", tags=["galileo"])
+app.include_router(transcript_ws_router, prefix="/api/galileo", tags=["transcript"])
 
 
 @app.get("/")

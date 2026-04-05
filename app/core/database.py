@@ -239,6 +239,18 @@ def get_db() -> sqlite3.Connection:
     return conn
 
 
+def get_active_session_id_for_agent(agent_id: str) -> str | None:
+    conn = get_db()
+    try:
+        row = conn.execute(
+            "SELECT id FROM call_sessions WHERE negotiation_id = ? AND status = 'active' ORDER BY created_at DESC LIMIT 1",
+            (agent_id,),
+        ).fetchone()
+        return row["id"] if row else None
+    finally:
+        conn.close()
+
+
 def _needs_schema_migration(conn, table: str, required_col: str) -> bool:
     cols = conn.execute(f"PRAGMA table_info({table})").fetchall()
     if not cols:
