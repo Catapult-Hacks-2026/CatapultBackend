@@ -19,7 +19,9 @@ class Settings(BaseSettings):
     twilio_to_phone_number: str = ""
     twilio_to_phone_numbers: str = ""
     hotel_rep_override_phone_number: str = ""
+    hotel_rep_override_phone_number_2: str = ""
     galileo_call_phone_number: str = ""
+    galileo_start_two_hotels: bool = False
 
     tts_api_key: str = ""
     tts_voice_id: str = ""

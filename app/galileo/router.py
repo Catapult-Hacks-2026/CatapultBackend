@@ -99,6 +99,22 @@ def _campaign_id_for_agent(event_id: str, agent_id: str) -> str:
     return f"galileo-{event_id}-{agent_id}"
 
 
+def _resolve_dial_slot_number(settings: Any, dial_slot: int | None) -> str:
+    slot = 2 if dial_slot == 2 else 1
+    if slot == 2:
+        return (
+            settings.hotel_rep_override_phone_number_2
+            or settings.hotel_rep_override_phone_number
+            or settings.galileo_call_phone_number
+            or settings.twilio_to_phone_number
+        )
+    return (
+        settings.hotel_rep_override_phone_number
+        or settings.galileo_call_phone_number
+        or settings.twilio_to_phone_number
+    )
+
+
 async def _sse_stream(
     request: Request,
     agent_id: str,
@@ -504,27 +520,22 @@ async def launch_negotiations(payload: LaunchNegotiationRequest) -> GalileoEvent
 
     event = GalileoEvent.model_validate(created)
 
-    # Trigger Twilio call for the agent marked as Negotiating
-    for agent in event.agents:
-        if agent.status == "Negotiating":
-            asyncio.create_task(_trigger_twilio_call(agent, event))
-            break
+    # Trigger Twilio calls for all agents marked as Negotiating.
+    negotiating_agents = [agent for agent in event.agents if agent.status == "Negotiating"]
+    for idx, agent in enumerate(negotiating_agents, start=1):
+        asyncio.create_task(_trigger_twilio_call(agent, event, dial_slot=idx))
 
     return event
 
 
-async def _trigger_twilio_call(agent: Agent, event: GalileoEvent) -> None:
+async def _trigger_twilio_call(agent: Agent, event: GalileoEvent, dial_slot: int | None = None) -> None:
     """Launch a voice campaign using the same API path as launch_voice_campaign.py."""
     import httpx
 
     settings = get_settings()
     base_url = settings.base_url.rstrip("/")
     campaign_id = _campaign_id_for_agent(event.id, agent.id)
-    destination_number = (
-        settings.hotel_rep_override_phone_number
-        or settings.galileo_call_phone_number
-        or settings.twilio_to_phone_number
-    )
+    destination_number = _resolve_dial_slot_number(settings, dial_slot)
 
     if not destination_number:
         logger.error(
@@ -548,6 +559,7 @@ async def _trigger_twilio_call(agent: Agent, event: GalileoEvent) -> None:
             "market": event.location,
             "event_id": event.id,
             "galileo_agent_id": agent.id,
+            "dial_slot": dial_slot or 1,
             "ideal_price": agent.idealPrice,
             "ceiling_price": agent.ceilingPrice,
         },
@@ -571,7 +583,7 @@ async def _trigger_twilio_call(agent: Agent, event: GalileoEvent) -> None:
         logger.error("Failed to launch voice campaign for agent %s: %s", agent.id, exc)
 
 
-async def trigger_twilio_call_for_agent_id(agent_id: str) -> None:
+async def trigger_twilio_call_for_agent_id(agent_id: str, dial_slot: int | None = None) -> None:
     agent_payload = await db_get_agent(agent_id)
     if not agent_payload:
         logger.warning("Cannot trigger Twilio call for missing Galileo agent %s", agent_id)
@@ -594,7 +606,7 @@ async def trigger_twilio_call_for_agent_id(agent_id: str) -> None:
         logger.exception("Failed to validate Galileo payloads before launching agent %s", agent_id)
         return
 
-    await _trigger_twilio_call(agent, event)
+    await _trigger_twilio_call(agent, event, dial_slot=dial_slot)
 
 
 @router.post("/market/event-window", response_model=list[EventWindowResult])

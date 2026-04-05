@@ -87,14 +87,24 @@ async def start_voice_node(state: WorkerSessionState) -> dict:
     settings = get_settings()
     try:
         from twilio.rest import Client as TwilioClient
-        destination_number = (
-            settings.hotel_rep_override_phone_number
-            or state.hotel_target.phone_number
-            or settings.twilio_to_phone_number
-        )
+        dial_slot = state.hotel_target.market_context.get("dial_slot")
+        if dial_slot == 2:
+            destination_number = (
+                settings.hotel_rep_override_phone_number_2
+                or settings.hotel_rep_override_phone_number
+                or state.hotel_target.phone_number
+                or settings.twilio_to_phone_number
+            )
+        else:
+            destination_number = (
+                settings.hotel_rep_override_phone_number
+                or state.hotel_target.phone_number
+                or settings.twilio_to_phone_number
+            )
         if not destination_number:
             raise ValueError(
                 "No outbound destination configured. Set HOTEL_REP_OVERRIDE_PHONE_NUMBER, "
+                "HOTEL_REP_OVERRIDE_PHONE_NUMBER_2, "
                 "hotel_target.phone_number, or TWILIO_TO_PHONE_NUMBER."
             )
         client = TwilioClient(settings.twilio_account_sid, settings.twilio_auth_token)

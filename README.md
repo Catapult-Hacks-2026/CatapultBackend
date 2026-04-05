@@ -75,7 +75,9 @@ TWILIO_PHONE_NUMBER=+1...
 TWILIO_TO_PHONE_NUMBER=+1...
 TWILIO_TO_PHONE_NUMBERS=+1..., +1...
 HOTEL_REP_OVERRIDE_PHONE_NUMBER=+1...
+HOTEL_REP_OVERRIDE_PHONE_NUMBER_2=+1...
 GALILEO_CALL_PHONE_NUMBER=+1...
+GALILEO_START_TWO_HOTELS=false
 
 # Public URL — must be reachable by Twilio (see Testing section)
 BASE_URL=https://your-ngrok-url.ngrok.io
@@ -152,7 +154,9 @@ Copy `.env.example` to `.env` and fill in the values:
 | `TWILIO_TO_PHONE_NUMBER` | Default destination phone number for outbound Twilio calls |
 | `TWILIO_TO_PHONE_NUMBERS` | Comma-separated destination phone numbers for ad hoc multi-call launch scripts |
 | `HOTEL_REP_OVERRIDE_PHONE_NUMBER` | If set, all worker calls dial this number instead of each hotel rep's stored phone number |
+| `HOTEL_REP_OVERRIDE_PHONE_NUMBER_2` | Second override number used for slot 2 when dual-hotel Galileo negotiation is enabled |
 | `GALILEO_CALL_PHONE_NUMBER` | Destination phone number used by Galileo agent launches; falls back to `TWILIO_TO_PHONE_NUMBER` if unset |
+| `GALILEO_START_TWO_HOTELS` | If `true`, Galileo starts the first two hotels in `Negotiating` status and launches two concurrent calls |
 | `TTS_API_KEY` | ElevenLabs API key for text-to-speech |
 | `TTS_VOICE_ID` | ElevenLabs voice ID |
 | `DATABASE_URL` | SQLite connection string (default: `sqlite+aiosqlite:///data/negotiations.db`) |

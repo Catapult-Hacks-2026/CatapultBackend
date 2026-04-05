@@ -135,6 +135,7 @@ class WorkerSession:
     async def _on_session_end(self, state: WorkerSessionState) -> None:
         self._state = state
         event_id = state.hotel_target.market_context.get("event_id")
+        dial_slot = state.hotel_target.market_context.get("dial_slot")
         if isinstance(event_id, str) and event_id:
             agent_id = _galileo_agent_id(state)
             if agent_id:
@@ -144,7 +145,8 @@ class WorkerSession:
 
                     promoted_agent = await promote_next_queued_agent(event_id)
                     if promoted_agent is not None and promoted_agent["id"] != agent_id:
-                        asyncio.create_task(trigger_twilio_call_for_agent_id(promoted_agent["id"]))
+                        slot = dial_slot if isinstance(dial_slot, int) else 1
+                        asyncio.create_task(trigger_twilio_call_for_agent_id(promoted_agent["id"], dial_slot=slot))
                 except Exception:
                     logger.exception("Failed to start next queued Galileo agent after call end")
         self._pipeline_done.set()

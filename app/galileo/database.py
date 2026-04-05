@@ -10,6 +10,7 @@ from uuid import uuid4
 
 import aiosqlite
 
+from app.core.config import get_settings
 from app.core.database import DB_PATH
 
 
@@ -1353,6 +1354,7 @@ async def create_event_with_agents(launch_request: Any) -> dict[str, Any] | None
     # Top-level idealPrice/ceilingPrice override guardrails
     top_ideal = _get_value(payload, "idealPrice", "ideal_price")
     top_ceiling = _get_value(payload, "ceilingPrice", "ceiling_price")
+    initial_negotiating_count = 2 if get_settings().galileo_start_two_hotels else 1
 
     conn = await _connect()
     try:
@@ -1438,7 +1440,7 @@ async def create_event_with_agents(launch_request: Any) -> dict[str, Any] | None
                 minimum, maximum = _price_range_for_service(service_type)
                 original_price = round(random.uniform(max(ideal_price, minimum), max(ceiling_price, maximum)), 2)
                 current_price = round(original_price * random.uniform(0.92, 0.99), 2)
-                agent_status = GALILEO_NEGOTIATING_STATUS if idx == 0 else "Queued"
+                agent_status = GALILEO_NEGOTIATING_STATUS if idx < initial_negotiating_count else "Queued"
 
                 agent_id = str(uuid4())
                 await conn.execute(
