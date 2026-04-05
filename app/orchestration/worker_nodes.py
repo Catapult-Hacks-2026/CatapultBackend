@@ -181,6 +181,17 @@ async def listen_node(state: WorkerSessionState) -> dict:
         len(state.quotes_received),
         state.outcome,
     )
+
+    # Hang up the Twilio call
+    if state.call_sid:
+        try:
+            from twilio.rest import Client as TwilioClient
+            client = TwilioClient(settings.twilio_account_sid, settings.twilio_auth_token)
+            client.calls(state.call_sid).update(status="completed")
+            logger.info("listen_node: hung up call session_id=%s call_sid=%s", state.session_id, state.call_sid)
+        except Exception as exc:
+            logger.warning("listen_node: failed to hang up call %s: %s", state.call_sid, exc)
+
     return {"status": SessionStatus.COMPLETED}
 
 

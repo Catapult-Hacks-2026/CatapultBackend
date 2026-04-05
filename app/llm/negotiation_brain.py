@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import AsyncGenerator
 
 from app.hotel.enums import MoveType
@@ -8,6 +9,8 @@ from app.hotel.schemas import AgentMove, HotelQuote, WorkerSessionState
 from app.hotel.scoring import score_hotel_quote
 from app.llm.openai_client import invoke_json, stream_text
 from app.llm.prompts import NEGOTIATION_BRAIN_SYSTEM, RESPONSE_GENERATION_SYSTEM
+
+logger = logging.getLogger(__name__)
 
 
 def _build_brain_context(session_state: WorkerSessionState) -> str:
@@ -68,10 +71,28 @@ async def decide_move(
             f"\n\nIMPORTANT — your previous response was REJECTED by guardrails: "
             f"{guardrail_feedback}. You MUST avoid this violation in your next response."
         )
+    print("\n" + "="*80)
+    print("NEGOTIATION BRAIN CONTEXT")
+    print("="*80)
+    print(context)
+    print("="*80 + "\n")
+    logger.info("=== NEGOTIATION BRAIN CONTEXT ===\n%s\n=== END CONTEXT ===", context)
+
     data = await invoke_json(
         NEGOTIATION_BRAIN_SYSTEM, context,
         model="gpt-4.1-mini", temperature=0.2, max_tokens=512,
     )
+
+    print("="*80)
+    print("BRAIN DECISION")
+    print("="*80)
+    print(f"move_type: {data.get('move_type')}")
+    print(f"counter_rate: {data.get('counter_rate')}")
+    print(f"reasoning: {data.get('reasoning')}")
+    print(f"should_terminate: {data.get('should_terminate')}")
+    print("="*80 + "\n")
+    logger.info("=== BRAIN DECISION ===\nmove_type=%s, counter_rate=%s, reasoning=%s, should_terminate=%s\n=== END DECISION ===",
+                data.get("move_type"), data.get("counter_rate"), data.get("reasoning"), data.get("should_terminate"))
 
     move_type = MoveType(data.get("move_type", MoveType.PROBE))
     counter_rate = data.get("counter_rate")

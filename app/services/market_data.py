@@ -205,10 +205,13 @@ def get_market_context(
     """
     r = get_redis()
     lines: list[str] = []
+    print(f"\n>>> get_market_context: hotel_name='{hotel_name}' location='{location}' check_in_month={check_in_month}")
 
     # 1. This hotel's historic pricing
     hotel_key = f"{_PRICING_PREFIX}:{_normalize(hotel_name)}"
+    print(f">>> Looking up hotel_key: {hotel_key}")
     hotel_pricing = _fetch_records(r, hotel_key)
+    print(f">>> Found {len(hotel_pricing)} hotel pricing records")
     if hotel_pricing:
         prices = [p["price"] for p in hotel_pricing]
         lines.append(
@@ -291,9 +294,12 @@ def get_market_context(
         )
 
     if not lines:
+        print(f">>> No market intelligence found")
         return ""
 
-    return "Market intelligence:\n" + "\n".join(lines)
+    result = "Market intelligence:\n" + "\n".join(lines)
+    print(f">>> Market intelligence result:\n{result}\n")
+    return result
 
 
 def _fetch_records(r, sorted_set_key: str, limit: int = 50) -> list[dict]:
