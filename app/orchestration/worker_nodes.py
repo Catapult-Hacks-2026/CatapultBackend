@@ -22,29 +22,6 @@ def _backend_url(path: str) -> str:
 
 async def load_context_node(state: WorkerSessionState) -> dict:
     hotel_id = state.hotel_target.hotel_id
-    client = get_http_client()
-    try:
-        hotel_resp = await client.get(_backend_url(f"/api/hotels/{hotel_id}"))
-        hotel_data = hotel_resp.json() if hotel_resp.status_code == 200 else {}
-    except Exception as exc:
-        logger.warning("load_context: failed to fetch hotel %s: %s", hotel_id, exc)
-        hotel_data = {}
-
-    try:
-        quotes_resp = await client.get(_backend_url(f"/api/hotels/{hotel_id}/quotes"))
-        prior_quotes = quotes_resp.json() if quotes_resp.status_code == 200 else []
-    except Exception as exc:
-        logger.warning("load_context: failed to fetch quotes for %s: %s", hotel_id, exc)
-
-    prior_low = min((q.get("nightly_rate", 0) for q in prior_quotes if q.get("nightly_rate")), default=None)
-    prior_count = len(prior_quotes)
-
-    negotiation_summary = None
-    if prior_count > 0 and prior_low is not None:
-        negotiation_summary = (
-            f"{prior_count} prior quote(s) on record. "
-            f"Lowest historical rate: ${prior_low:.2f}/night."
-        )
 
     # Fetch market intelligence from Redis (historic rates + past deals)
     from app.services.market_data import get_market_context
@@ -64,7 +41,6 @@ async def load_context_node(state: WorkerSessionState) -> dict:
 
     return {
         "behavioral_priors": {
-            "negotiation_summary": negotiation_summary,
             "market_brief": market_brief,
         }
     }
@@ -74,7 +50,7 @@ async def load_memory_node(state: WorkerSessionState) -> dict:
     from app.memory.behavioral_store import get_behavioral_store
     store = get_behavioral_store()
     profile = await store.load_priors(state.hotel_target.hotel_id)
-    # Merge with existing priors (preserves market_brief from load_context_node)
+    # Merge with existing priors, preserving market_brief from load_context_node
     merged = dict(state.behavioral_priors)
     merged["negotiation_summary"] = profile.to_prompt_context()
     return {
@@ -186,7 +162,8 @@ async def listen_node(state: WorkerSessionState) -> dict:
     if state.call_sid:
         try:
             from twilio.rest import Client as TwilioClient
-            client = TwilioClient(settings.twilio_account_sid, settings.twilio_auth_token)
+            _settings = get_settings()
+            client = TwilioClient(_settings.twilio_account_sid, _settings.twilio_auth_token)
             client.calls(state.call_sid).update(status="completed")
             logger.info("listen_node: hung up call session_id=%s call_sid=%s", state.session_id, state.call_sid)
         except Exception as exc:

@@ -45,6 +45,7 @@ def seed_market_data() -> int:
     inserted = 0
 
     if _PRICING_CSV.exists():
+        logger.info("seed_market_data: loading historic pricing from %s", _PRICING_CSV)
         with open(_PRICING_CSV, newline="") as f:
             reader = csv.DictReader(f)
             for row in reader:
@@ -65,8 +66,11 @@ def seed_market_data() -> int:
                         (hotel, location, month, year, price),
                     )
                     inserted += 1
+    else:
+        logger.warning("seed_market_data: pricing CSV not found at %s", _PRICING_CSV)
 
     if _DEALS_CSV.exists():
+        logger.info("seed_market_data: loading past negotiations from %s", _DEALS_CSV)
         with open(_DEALS_CSV, newline="") as f:
             reader = csv.DictReader(f)
             for row in reader:
@@ -91,11 +95,15 @@ def seed_market_data() -> int:
                         (hotel, location, month, year, starting, negotiated, proposed),
                     )
                     inserted += 1
+    else:
+        logger.warning("seed_market_data: deals CSV not found at %s", _DEALS_CSV)
 
     conn.commit()
     conn.close()
     if inserted:
         logger.info("seed_market_data: inserted %d rows", inserted)
+    else:
+        logger.warning("seed_market_data: no rows inserted (CSV files may be missing)")
     return inserted
 
 
@@ -205,13 +213,10 @@ def get_market_context(
     """
     r = get_redis()
     lines: list[str] = []
-    print(f"\n>>> get_market_context: hotel_name='{hotel_name}' location='{location}' check_in_month={check_in_month}")
 
     # 1. This hotel's historic pricing
     hotel_key = f"{_PRICING_PREFIX}:{_normalize(hotel_name)}"
-    print(f">>> Looking up hotel_key: {hotel_key}")
     hotel_pricing = _fetch_records(r, hotel_key)
-    print(f">>> Found {len(hotel_pricing)} hotel pricing records")
     if hotel_pricing:
         prices = [p["price"] for p in hotel_pricing]
         lines.append(
@@ -294,12 +299,9 @@ def get_market_context(
         )
 
     if not lines:
-        print(f">>> No market intelligence found")
         return ""
 
-    result = "Market intelligence:\n" + "\n".join(lines)
-    print(f">>> Market intelligence result:\n{result}\n")
-    return result
+    return "Market intelligence:\n" + "\n".join(lines)
 
 
 def _fetch_records(r, sorted_set_key: str, limit: int = 50) -> list[dict]:

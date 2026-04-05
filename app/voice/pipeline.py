@@ -169,6 +169,7 @@ class VoicePipeline:
         response_text = await self._speak(move)
         move.response_text = response_text
         self._state.moves_made.append(move)
+        self._state.next_move = move
         self._state.transcript.append({"role": "agent", "content": response_text})
 
         if move.should_terminate:

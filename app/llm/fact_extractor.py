@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import logging
+
 from app.hotel.schemas import HotelQuote, WorkerSessionState
 from app.llm.openai_client import invoke_json
 from app.llm.prompts import FACT_EXTRACTION_SYSTEM
+
+logger = logging.getLogger(__name__)
 
 # Use the fast model for all extractions; escalate only when result is ambiguous
 _FAST_MODEL = "gpt-4o-mini"
@@ -30,6 +34,13 @@ async def extract_facts_from_utterance(
             data = await invoke_json(FACT_EXTRACTION_SYSTEM, user_prompt, model=_FULL_MODEL, temperature=0.0)
     except Exception:
         return None
+
+    logger.info(
+        "=== FACT EXTRACTION === utterance=%r extracted nightly_rate=%s raw_text=%r",
+        utterance,
+        data.get("nightly_rate"),
+        data.get("raw_text"),
+    )
 
     if data.get("nightly_rate") is None:
         return None

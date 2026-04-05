@@ -15,9 +15,14 @@ logger = logging.getLogger(__name__)
 
 def _build_brain_context(session_state: WorkerSessionState) -> str:
     target = session_state.hotel_target
+    hotel_name = target.market_context.get("hotel_name", target.hotel_id)
+    location = target.market_context.get("location", "")
     lines = [
+        f"Hotel: {hotel_name}" + (f" ({location})" if location else ""),
         f"Check-in: {target.check_in}, Check-out: {target.check_out}",
         f"Room type: {target.room_type}",
+        f"Target rate: ${target.target_rate}/night (do not reveal this number)",
+        f"Maximum acceptable rate: ${target.max_rate}/night (do not reveal this number)",
         f"Moves so far: {len(session_state.moves_made)}",
     ]
 
@@ -41,6 +46,16 @@ def _build_brain_context(session_state: WorkerSessionState) -> str:
             lines.append(f"Cancellation: {best.cancellation_policy}")
     else:
         lines.append("No quotes received yet — open the negotiation.")
+
+    last_counter = next(
+        (m.counter_rate for m in reversed(session_state.moves_made) if m.counter_rate is not None),
+        None,
+    )
+    if last_counter is not None:
+        lines.append(
+            f"Your last proposed rate: ${last_counter}/night — do not propose a lower rate "
+            f"unless the hotel explicitly rejects this and pushes back further."
+        )
 
     # Include only negotiation-relevant priors, not raw API dumps
     priors = session_state.behavioral_priors
@@ -111,6 +126,7 @@ async def generate_response_streaming(
     session_state: WorkerSessionState,
 ) -> AsyncGenerator[str, None]:
     target = session_state.hotel_target
+    hotel_name = target.market_context.get("hotel_name", target.hotel_id)
     context_lines = session_state.transcript[-4:] if len(session_state.transcript) >= 4 else session_state.transcript
     transcript_text = "\n".join(f"{t['role']}: {t['content']}" for t in context_lines)
 
@@ -118,10 +134,23 @@ async def generate_response_streaming(
     if move.counter_rate is not None:
         counter_hint = f"Counter with ${move.counter_rate}/night. "
 
+    reasoning_hint = f"Reasoning: {move.reasoning}\n" if move.reasoning else ""
+
+    if move.move_type == MoveType.OPEN:
+        date_line = f"Check-in: {target.check_in}, Check-out: {target.check_out}\n"
+    else:
+        date_line = ""
+
     user_prompt = (
+        f"Hotel: {hotel_name}\n"
+        f"{date_line}"
+        f"Room: {target.room_type}\n"
         f"Move type: {move.move_type.value}\n"
         f"{counter_hint}"
+        f"{reasoning_hint}"
         f"Recent conversation:\n{transcript_text}"
     )
 
-    return stream_text(RESPONSE_GENERATION_SYSTEM, user_prompt, max_tokens=200)
+    logger.info("=== RESPONSE GENERATION PROMPT ===\n%s\n=== END PROMPT ===", user_prompt)
+
+    return stream_text(RESPONSE_GENERATION_SYSTEM, user_prompt, model="gpt-4.1", max_tokens=200)
