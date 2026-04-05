@@ -300,10 +300,42 @@ def route_terminate(state: WorkerSessionState) -> str:
     return "continue"
 
 
+_OUTCOME_TO_GALILEO_STATUS: dict[str, str] = {
+    NegotiationOutcome.RATE_CONFIRMED: "Completed",
+    NegotiationOutcome.CALLBACK_REQUESTED: "Awaiting Callback",
+    NegotiationOutcome.NO_AVAILABILITY: "Completed",
+    NegotiationOutcome.ESCALATED_TO_HUMAN: "Reviewing",
+    NegotiationOutcome.FAILED: "Failed",
+    NegotiationOutcome.TIMED_OUT: "Failed",
+}
+
+
+async def _update_galileo_agent(
+    agent_id: str,
+    outcome: str | NegotiationOutcome,
+    best_rate: float | None,
+) -> None:
+    """Persist call result to the galileo_agents table so the frontend sees it."""
+    from app.galileo.database import update_agent_call_result
+
+    status = _OUTCOME_TO_GALILEO_STATUS.get(str(outcome), "Completed")
+    try:
+        await update_agent_call_result(
+            agent_id=agent_id,
+            status=status,
+            outcome=str(outcome),
+            current_price=best_rate,
+        )
+    except Exception as exc:
+        logger.warning("_update_galileo_agent: failed for agent %s: %s", agent_id, exc)
+
+
 async def post_call_node(state: WorkerSessionState) -> dict:
     # If the lock was lost, only mark the session as failed and emit the
     # event — skip analysis, summaries, and memory writes that could
     # conflict with a replacement worker that now owns this hotel.
+    galileo_agent_id = state.hotel_target.market_context.get("galileo_agent_id")
+
     if "lock expired" in state.error_log:
         logger.info("post_call_node: lock lost for session %s, marking failed", state.session_id)
         client = get_http_client()
@@ -314,12 +346,16 @@ async def post_call_node(state: WorkerSessionState) -> dict:
             })
         except Exception as exc:
             logger.warning("post_call_node: failed to patch session status: %s", exc)
+
+        if galileo_agent_id:
+            await _update_galileo_agent(galileo_agent_id, NegotiationOutcome.FAILED, None)
+
         await get_event_bus().publish(WorkerEvent(
             event_type=EventType.WORKER_FAILED,
             session_id=state.session_id,
             campaign_id=state.campaign_id,
             hotel_id=state.hotel_target.hotel_id,
-            payload={"reason": "lock expired"},
+            payload={"reason": "lock expired", "galileo_agent_id": galileo_agent_id},
         ))
         return {"status": SessionStatus.FAILED, "outcome": NegotiationOutcome.FAILED}
 
@@ -341,10 +377,20 @@ async def post_call_node(state: WorkerSessionState) -> dict:
                 logger.warning("voice receipt send failed for %s: %s", state.session_id, exc)
                 state.error_log.append(f"receipt_send_failed: {exc}")
 
+        # Prefer the deterministic outcome set by the pipeline over the LLM's guess.
+        # The pipeline derives outcome from actual moves (ACCEPT -> RATE_CONFIRMED, etc.)
+        # Only fall back to the LLM outcome if the pipeline didn't set one.
+        final_outcome = state.outcome if state.outcome is not None else analysis.outcome
+        # If pipeline says RATE_CONFIRMED (agent explicitly accepted), trust it
+        # even if the LLM disagrees.
+        if state.outcome == NegotiationOutcome.RATE_CONFIRMED:
+            final_outcome = NegotiationOutcome.RATE_CONFIRMED
+        analysis.outcome = final_outcome
+
         client = get_http_client()
         await client.patch(_backend_url(f"/api/sessions/{state.session_id}"), json={
             "status": SessionStatus.COMPLETED,
-            "outcome": analysis.outcome,
+            "outcome": final_outcome,
             "transcript": state.transcript,
             "summary": analysis.summary,
             "key_patterns": analysis.key_patterns,
@@ -368,6 +414,9 @@ async def post_call_node(state: WorkerSessionState) -> dict:
 
         best_rate = min((q.nightly_rate for q in state.quotes_received), default=None)
 
+        if galileo_agent_id:
+            await _update_galileo_agent(galileo_agent_id, analysis.outcome, best_rate)
+
         # Emit outcome event
         event_type = (
             EventType.DEAL_CLOSED
@@ -381,18 +430,21 @@ async def post_call_node(state: WorkerSessionState) -> dict:
             session_id=state.session_id,
             campaign_id=state.campaign_id,
             hotel_id=state.hotel_target.hotel_id,
-            payload={"outcome": analysis.outcome, "best_rate": best_rate},
+            payload={"outcome": analysis.outcome, "best_rate": best_rate, "galileo_agent_id": galileo_agent_id},
         ))
 
         return {"status": SessionStatus.COMPLETED, "outcome": analysis.outcome}
     except Exception as exc:
         logger.exception("post_call_node failed: %s", exc)
+        if galileo_agent_id:
+            await _update_galileo_agent(galileo_agent_id, NegotiationOutcome.FAILED, None)
+
         await get_event_bus().publish(WorkerEvent(
             event_type=EventType.WORKER_FAILED,
             session_id=state.session_id,
             campaign_id=state.campaign_id,
             hotel_id=state.hotel_target.hotel_id,
-            payload={"reason": str(exc)},
+            payload={"reason": str(exc), "galileo_agent_id": galileo_agent_id},
         ))
         return {"status": SessionStatus.COMPLETED, "outcome": NegotiationOutcome.FAILED}
 

@@ -72,9 +72,19 @@ class VoicePipeline:
         await self._done.wait()
         inbound.cancel()
         monitor.cancel()
-   
+
+        # If no outcome was set by a terminating move, derive it from state
+        if self._state.outcome is None:
+            from app.hotel.enums import NegotiationOutcome
+            self._state.outcome = self._derive_outcome()
+
         if self._on_transcript_update:
-            await self._on_transcript_update({"type": "call_ended"})
+            best_rate = min((q.nightly_rate for q in self._state.quotes_received), default=None)
+            await self._on_transcript_update({
+                "type": "call_ended",
+                "outcome": str(self._state.outcome),
+                "final_price": best_rate,
+            })
         if self._on_session_end:
             await self._on_session_end(self._state)
         await self._stt.close()
@@ -194,7 +204,6 @@ class VoicePipeline:
             await stall_task
 
         if quote is not None:
-            self._state.quotes_received.append(quote)
             if self._on_quote_received:
                 await self._on_quote_received(quote)
 
@@ -211,7 +220,45 @@ class VoicePipeline:
                 "index": len(self._state.transcript) - 1,
             })
 
+        # Record Galileo counter-offers as price changes
+        if move.counter_rate and move.counter_rate > 0:
+            galileo_agent_id = self._state.hotel_target.market_context.get("galileo_agent_id")
+            if galileo_agent_id:
+                try:
+                    from app.galileo.database import record_price_change
+                    await record_price_change(
+                        agent_id=galileo_agent_id,
+                        price=move.counter_rate,
+                        source="galileo",
+                    )
+                    if self._on_transcript_update:
+                        await self._on_transcript_update({
+                            "type": "price_changed",
+                            "galileo_agent_id": galileo_agent_id,
+                            "price": move.counter_rate,
+                            "source": "galileo",
+                        })
+                except Exception:
+                    logger.warning("Failed to record galileo counter for agent %s", galileo_agent_id)
+
         if move.should_terminate:
+            # Derive outcome from the terminating move
+            from app.hotel.enums import MoveType, NegotiationOutcome
+            if move.move_type == MoveType.ACCEPT:
+                self._state.outcome = NegotiationOutcome.RATE_CONFIRMED
+            elif move.move_type == MoveType.CLOSE:
+                # Close without accept -- check if hotel asked for callback
+                last_hotel = next(
+                    (t["content"] for t in reversed(self._state.transcript) if t["role"] == "hotel"),
+                    "",
+                )
+                if any(w in last_hotel.lower() for w in ("call back", "callback", "call you back", "follow up")):
+                    self._state.outcome = NegotiationOutcome.CALLBACK_REQUESTED
+                else:
+                    self._state.outcome = NegotiationOutcome.NO_AVAILABILITY
+            else:
+                self._state.outcome = NegotiationOutcome.FAILED
+
             # Send a Twilio mark after the final audio. The inbound loop
             # will fire _done.set() when Twilio confirms the audio has
             # finished playing, so the caller hears the full message
@@ -309,3 +356,38 @@ class VoicePipeline:
 
     def signal_done(self) -> None:
         self._done.set()
+
+    def _derive_outcome(self) -> "NegotiationOutcome":
+        """Derive the negotiation outcome from the moves made during the call."""
+        from app.hotel.enums import MoveType, NegotiationOutcome
+
+        if not self._state.moves_made:
+            return NegotiationOutcome.FAILED
+
+        last_move = self._state.moves_made[-1]
+
+        # Explicit accept move means rate was confirmed
+        if last_move.move_type == MoveType.ACCEPT:
+            return NegotiationOutcome.RATE_CONFIRMED
+
+        # Any move that accepted is a confirmed rate
+        for move in reversed(self._state.moves_made):
+            if move.move_type == MoveType.ACCEPT:
+                return NegotiationOutcome.RATE_CONFIRMED
+
+        # Check transcript for callback indicators
+        for entry in reversed(self._state.transcript):
+            if entry["role"] == "hotel":
+                text = entry["content"].lower()
+                if any(w in text for w in ("call back", "callback", "call you back", "follow up", "ring you back")):
+                    return NegotiationOutcome.CALLBACK_REQUESTED
+                if any(w in text for w in ("no availability", "sold out", "fully booked", "no rooms")):
+                    return NegotiationOutcome.NO_AVAILABILITY
+                break  # only check the last hotel utterance
+
+        # Close move without accept
+        if last_move.move_type == MoveType.CLOSE:
+            return NegotiationOutcome.FAILED
+
+        # Fell through -- timed out or disconnected
+        return NegotiationOutcome.TIMED_OUT

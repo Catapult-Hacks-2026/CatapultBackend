@@ -24,6 +24,8 @@ from app.galileo.database import (
     get_event as db_get_event,
     get_events as db_get_events,
     intervene_agent as db_intervene_agent,
+    record_final_offer as db_record_final_offer,
+    record_price_change as db_record_price_change,
 )
 from app.galileo.schemas import (
     AcceptOfferRequest,
@@ -33,11 +35,15 @@ from app.galileo.schemas import (
     EnterpriseCompanyView,
     EventWindowRequest,
     EventWindowResult,
+    FinalOfferRequest,
+    FinalOfferResult,
     GalileoEvent,
     InterventionResult,
     LaunchNegotiationRequest,
     MarketPricingRequest,
     MarketPricingResult,
+    PriceChangeRequest,
+    PriceChangeResult,
 )
 
 router = APIRouter()
@@ -238,6 +244,100 @@ async def intervene(agent_id: str) -> InterventionResult:
     return InterventionResult.model_validate(result)
 
 
+@router.post("/agents/{agent_id}/price-change", response_model=PriceChangeResult)
+async def price_change(agent_id: str, payload: PriceChangeRequest) -> PriceChangeResult:
+    """Record a confirmed negotiation price change.
+
+    Source must be "galileo" (our agent proposed it) or "hotel_rep" (the hotel
+    representative countered). Each call inserts a price point, updates the
+    agent's current_price, and adds an activity-stream entry.
+    """
+    from app.core.events import EventType, WorkerEvent, get_event_bus
+
+    agent = await db_get_agent(agent_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    if agent.get("status") not in ("Negotiating", "Reviewing"):
+        raise HTTPException(status_code=409, detail="Agent is not in an active negotiation")
+
+    result = await db_record_price_change(
+        agent_id=agent_id,
+        price=payload.price,
+        source=payload.source,
+        round_num=payload.round,
+    )
+    if result is None:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    # Publish price change event so WebSocket subscribers get notified
+    await get_event_bus().publish(WorkerEvent(
+        event_type=EventType.PRICE_CHANGED,
+        session_id="",
+        campaign_id="",
+        hotel_id=agent.get("companyId", ""),
+        payload={
+            "galileo_agent_id": agent_id,
+            "price": result["price"],
+            "previous_price": result["previous_price"],
+            "source": result["source"],
+            "round": result["round"],
+        },
+    ))
+
+    return PriceChangeResult.model_validate({
+        "agentId": agent_id,
+        "price": result["price"],
+        "previousPrice": result["previous_price"],
+        "marketPrice": result["market_price"],
+        "source": result["source"],
+        "round": result["round"],
+    })
+
+
+@router.post("/agents/{agent_id}/close-deal", response_model=FinalOfferResult)
+async def close_deal(agent_id: str, payload: FinalOfferRequest) -> FinalOfferResult:
+    """Finalize a deal once negotiation is closed.
+
+    Records the final accepted price, marks the agent as Completed with
+    RATE_CONFIRMED outcome, updates enterprise savings, and notifies
+    connected frontends via the event bus.
+    """
+    from app.core.events import EventType, WorkerEvent, get_event_bus
+
+    agent = await db_get_agent(agent_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    result = await db_record_final_offer(
+        agent_id=agent_id,
+        final_price=payload.finalPrice,
+        enterprise_id=payload.enterpriseId,
+    )
+    if result is None:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    # Publish deal finalized event
+    await get_event_bus().publish(WorkerEvent(
+        event_type=EventType.DEAL_FINALIZED,
+        session_id="",
+        campaign_id="",
+        hotel_id=agent.get("companyId", ""),
+        payload={
+            "galileo_agent_id": agent_id,
+            "final_price": result["final_price"],
+            "market_price": result["market_price"],
+            "savings": result["savings"],
+        },
+    ))
+
+    return FinalOfferResult.model_validate({
+        "agentId": agent_id,
+        "finalPrice": result["final_price"],
+        "marketPrice": result["market_price"],
+        "savings": result["savings"],
+    })
+
+
 @router.get("/agents/{agent_id}/activity-stream")
 async def activity_stream(agent_id: str, request: Request) -> EventSourceResponse:
     return await _sse_stream(request, agent_id, payload_key="activityStream", event_name="activity")
@@ -432,6 +532,8 @@ async def _trigger_twilio_call(agent: Agent, event: GalileoEvent) -> None:
             "location": event.location,
             "market": event.location,
             "galileo_agent_id": agent.id,
+            "ideal_price": agent.idealPrice,
+            "ceiling_price": agent.ceilingPrice,
         },
     }
 

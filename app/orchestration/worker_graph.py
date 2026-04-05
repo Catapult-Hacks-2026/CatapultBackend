@@ -104,6 +104,34 @@ class WorkerSession:
             except Exception:
                 logger.exception("Failed to sync quote to Galileo agent %s", agent_id)
 
+        # Record the price change in galileo DB and emit event
+        galileo_agent_id = self._state.hotel_target.market_context.get("galileo_agent_id")
+        if galileo_agent_id and hasattr(quote, "nightly_rate") and quote.nightly_rate > 0:
+            try:
+                from app.galileo.database import record_price_change
+                await record_price_change(
+                    agent_id=galileo_agent_id,
+                    price=quote.nightly_rate,
+                    source="hotel_rep",
+                )
+            except Exception:
+                import logging
+                logging.getLogger(__name__).warning(
+                    "Failed to record price change for agent %s", galileo_agent_id,
+                )
+
+            await get_event_bus().publish(WorkerEvent(
+                event_type=EventType.PRICE_CHANGED,
+                session_id=self._state.session_id,
+                campaign_id=self._state.campaign_id,
+                hotel_id=self._state.hotel_target.hotel_id,
+                payload={
+                    "galileo_agent_id": galileo_agent_id,
+                    "price": quote.nightly_rate,
+                    "source": "hotel_rep",
+                },
+            ))
+
     async def _on_session_end(self, state: WorkerSessionState) -> None:
         self._state = state
         self._pipeline_done.set()
@@ -113,9 +141,13 @@ class WorkerSession:
             "transcript_partial": EventType.TRANSCRIPT_PARTIAL,
             "transcript_final": EventType.TRANSCRIPT_FINAL,
             "call_ended": EventType.CALL_ENDED,
+            "price_changed": EventType.PRICE_CHANGED,
         }
+        mapped = event_type_map.get(data["type"])
+        if mapped is None:
+            return
         event = WorkerEvent(
-            event_type=event_type_map[data["type"]],
+            event_type=mapped,
             session_id=self._state.session_id,
             campaign_id=getattr(self._state, "campaign_id", ""),
             payload=data,
